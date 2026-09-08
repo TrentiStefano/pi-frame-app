@@ -9,6 +9,7 @@ release-*/
 .cache/
 playwright-report/
 test-results/
+.pi-subagents/
 .claude/worktrees/
 .codex/worktrees/
 .DS_Store

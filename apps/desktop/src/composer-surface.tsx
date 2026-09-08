@@ -1,4 +1,4 @@
-import { useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
+import { useLayoutEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import type { ComposerAttachment } from "./desktop-state";
 import type { MentionOption } from "./hooks/use-mention-menu";
 import type {
@@ -8,9 +8,9 @@ import type {
   ComposerSlashOptionEmptyState,
 } from "./composer-commands";
 import { hasFilesInDataTransfer } from "./composer-attachments";
-import { ExtensionDock, type ExtensionDockModel } from "./extension-session-ui";
-import { ExtensionIcon, FileIcon, ModelIcon, ReasoningIcon, SettingsIcon, SkillIcon, SparkIcon, StatusIcon } from "./icons";
+import { BrowserPreviewIcon, ExtensionIcon, FileIcon, ModelIcon, ReasoningIcon, SettingsIcon, SkillIcon, SparkIcon, StatusIcon } from "./icons";
 import { QueuedComposerMessages } from "./queued-composer-messages";
+import { useTranslation } from "react-i18next";
 
 type ExtensionMentionOption = Extract<MentionOption, { kind: "extension" }>;
 type FileMentionOption = Extract<MentionOption, { kind: "file" }>;
@@ -53,9 +53,7 @@ interface ComposerSurfaceProps {
   readonly textareaTestId: string;
   readonly textareaPlaceholder: string;
   readonly textareaClassName?: string;
-  readonly extensionDock?: ExtensionDockModel;
-  readonly extensionDockExpanded?: boolean;
-  readonly onToggleExtensionDock?: () => void;
+  readonly onTextareaHeightChange?: () => void;
   readonly footer: ReactNode;
 }
 
@@ -97,13 +95,68 @@ export function ComposerSurface({
   textareaTestId,
   textareaPlaceholder,
   textareaClassName,
-  extensionDock,
-  extensionDockExpanded = false,
-  onToggleExtensionDock,
+  onTextareaHeightChange,
   footer,
 }: ComposerSurfaceProps) {
+  const { t } = useTranslation();
   const [isDragActive, setIsDragActive] = useState(false);
   const dragDepthRef = useRef(0);
+  const surfaceRef = useRef<HTMLDivElement | null>(null);
+  const resizeAnimationRef = useRef<Animation | null>(null);
+  const textareaHeightRef = useRef<number | null>(null);
+  const previousDraftLengthRef = useRef(composerDraft.length);
+
+  useLayoutEffect(() => {
+    if (!onTextareaHeightChange) {
+      return;
+    }
+    const textarea = composerRef.current;
+    if (!textarea) {
+      return;
+    }
+
+    const previousTop = surfaceRef.current?.getBoundingClientRect().top;
+
+    if (textareaHeightRef.current === null) {
+      textareaHeightRef.current = textarea.getBoundingClientRect().height;
+    }
+
+    const prevHeight = textareaHeightRef.current;
+    const prevLength = previousDraftLengthRef.current;
+    previousDraftLengthRef.current = composerDraft.length;
+
+    let nextHeight = prevHeight;
+    if (!composerDraft) {
+      textarea.style.height = "";
+      nextHeight = textarea.getBoundingClientRect().height;
+    } else if (
+      textarea.scrollHeight > textarea.clientHeight ||
+      composerDraft.length < prevLength ||
+      composerDraft.includes("\n")
+    ) {
+      textarea.style.height = "auto";
+      nextHeight = Math.min(textarea.scrollHeight, 220);
+      textarea.style.height = `${nextHeight}px`;
+    }
+
+    const nextTop = surfaceRef.current?.getBoundingClientRect().top;
+    const offset = previousTop == null || nextTop == null ? 0 : previousTop - nextTop;
+    if (Math.abs(offset) > 0.5 && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      resizeAnimationRef.current?.cancel();
+      resizeAnimationRef.current = surfaceRef.current?.animate(
+        [
+          { transform: `translateY(${offset}px)` },
+          { transform: "translateY(0)" },
+        ],
+        { duration: 180, easing: "cubic-bezier(0.25, 1, 0.5, 1)" },
+      ) ?? null;
+    }
+
+    textareaHeightRef.current = nextHeight;
+    if (prevHeight !== null && Math.abs(prevHeight - nextHeight) > 1) {
+      onTextareaHeightChange();
+    }
+  }, [composerDraft, composerRef, onTextareaHeightChange]);
 
   const clearDragState = () => {
     dragDepthRef.current = 0;
@@ -149,6 +202,7 @@ export function ComposerSurface({
     <div
       className={`composer__surface ${isDragActive ? "composer__surface--drag-active" : ""}`}
       data-testid={`${textareaTestId}-surface`}
+      ref={surfaceRef}
       onPaste={onComposerPaste}
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
@@ -172,7 +226,7 @@ export function ComposerSurface({
             ) : null}
           </span>
           <button
-            aria-label={`Clear ${activeSlashCommand.title}`}
+            aria-label={t("composer.clearCommand", { command: activeSlashCommand.title })}
             className="composer__slash-intent-clear"
             type="button"
             onClick={onClearSlashCommand}
@@ -199,6 +253,10 @@ export function ComposerSurface({
                   className="composer-attachment__preview"
                   src={`data:${attachment.mimeType};base64,${attachment.data}`}
                 />
+              ) : attachment.kind === "browser-element" ? (
+                <span className="composer-attachment__icon" aria-hidden="true">
+                  <BrowserPreviewIcon />
+                </span>
               ) : (
                 <span className="composer-attachment__icon" aria-hidden="true">
                   <FileIcon />
@@ -206,7 +264,7 @@ export function ComposerSurface({
               )}
               <span className="composer-attachment__name">{attachment.name}</span>
               <button
-                aria-label={`Remove ${attachment.name}`}
+                aria-label={t("composer.removeAttachmentNamed", { name: attachment.name })}
                 className="composer-attachment__remove"
                 type="button"
                 onClick={() => onRemoveAttachment(attachment.id)}
@@ -216,9 +274,6 @@ export function ComposerSurface({
             </div>
           ))}
         </div>
-      ) : null}
-      {extensionDock && onToggleExtensionDock ? (
-        <ExtensionDock dock={extensionDock} expanded={extensionDockExpanded} onToggle={onToggleExtensionDock} />
       ) : null}
       {lastError ? (
         <div className="composer__error error-banner" data-testid="composer-error-banner">
@@ -269,7 +324,7 @@ export function ComposerSurface({
                               <span className="slash-menu__title">{command.title}</span>
                               {command.sourceLabel ? <span className="slash-menu__skill-badge">{command.sourceLabel}</span> : null}
                               {command.compatibility?.status === "terminal-only" ? (
-                                <span className="slash-menu__skill-badge slash-menu__skill-badge--warning">Terminal-only</span>
+                                <span className="slash-menu__skill-badge slash-menu__skill-badge--warning">{t("extensions.terminalOnly")}</span>
                               ) : null}
                             </span>
                             <span className="slash-menu__description">{command.description}</span>
@@ -346,6 +401,7 @@ function MentionMenuSections({
   readonly onSelect: (option: MentionOption) => void;
   readonly onEnableExtension: (option: ExtensionMentionOption) => void;
 }) {
+  const { t } = useTranslation();
   const extensionOptions = options.filter((option): option is ExtensionMentionOption => option.kind === "extension");
   const fileOptions = options.filter((option): option is FileMentionOption => option.kind === "file");
 
@@ -353,7 +409,7 @@ function MentionMenuSections({
     <>
       {extensionOptions.length > 0 ? (
         <MentionMenuSection
-          title="Extensions"
+          title={t("common.extensions")}
           options={extensionOptions}
           selectedIndex={selectedIndex}
           allOptions={options}
@@ -363,7 +419,7 @@ function MentionMenuSections({
       ) : null}
       {fileOptions.length > 0 ? (
         <MentionMenuSection
-          title="Files"
+          title={t("composer.files")}
           options={fileOptions}
           selectedIndex={selectedIndex}
           allOptions={options}
@@ -417,6 +473,7 @@ function MentionMenuItem({
   readonly onSelect: (option: MentionOption) => void;
   readonly onEnableExtension: (option: ExtensionMentionOption) => void;
 }) {
+  const { t } = useTranslation();
   if (option.kind === "extension") {
     return (
       <div
@@ -441,7 +498,7 @@ function MentionMenuItem({
             <span className="mention-menu__line">
               <span className="mention-menu__filename">{option.displayName}</span>
               {option.enabled ? null : (
-                <span className="mention-menu__badge">{option.enabling ? "Enabling" : "Disabled"}</span>
+                <span className="mention-menu__badge">{option.enabling ? t("extensions.enabling") : t("common.disabled")}</span>
               )}
             </span>
             <span className="mention-menu__description">{option.description}</span>
@@ -449,13 +506,13 @@ function MentionMenuItem({
         </button>
         {option.enabled ? null : (
           <button
-            aria-label={`Enable ${option.displayName}`}
+            aria-label={t("extensions.enableNamed", { name: option.displayName })}
             className="mention-menu__enable"
             disabled={option.enabling}
             type="button"
             onClick={() => onEnableExtension(option)}
           >
-            {option.enabling ? "Enabling" : "Enable"}
+            {option.enabling ? t("extensions.enabling") : t("extensions.enable")}
           </button>
         )}
       </div>

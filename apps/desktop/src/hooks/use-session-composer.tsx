@@ -5,6 +5,7 @@ import {
   type KeyboardEvent,
   type MutableRefObject,
   type SetStateAction,
+  useRef,
   useState,
 } from "react";
 import {
@@ -21,6 +22,12 @@ import {
 } from "../composer-attachments";
 import { parseTreeComposerCommand } from "../composer-commands";
 import type { PiDesktopApi } from "../ipc";
+import {
+  defaultShortcutBindings,
+  insertTextAtSelection,
+  shortcutMatches,
+  type ShortcutBindings,
+} from "../keyboard-shortcuts";
 
 interface UseSessionComposerParams {
   readonly api: PiDesktopApi | undefined;
@@ -37,6 +44,7 @@ interface UseSessionComposerParams {
   readonly handleSlashKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => boolean;
   readonly newThreadComposerRef: MutableRefObject<HTMLTextAreaElement | null>;
   readonly appendNewThreadAttachment: (attachment: ComposerImageAttachment) => void;
+  readonly shortcutBindings?: ShortcutBindings;
 }
 
 export function useSessionComposer(params: UseSessionComposerParams) {
@@ -55,13 +63,15 @@ export function useSessionComposer(params: UseSessionComposerParams) {
     handleSlashKeyDown,
     newThreadComposerRef,
     appendNewThreadAttachment,
+    shortcutBindings = defaultShortcutBindings,
   } = params;
 
   const [attachmentsClearedOnSubmit, setAttachmentsClearedOnSubmit] = useState(false);
+  const submitInFlightRef = useRef(false);
   const composerAttachments = attachmentsClearedOnSubmit ? [] : (snapshot?.composerAttachments ?? []);
 
   const submitComposerDraft = (options: { readonly deliverAs?: "steer" | "followUp" } = {}) => {
-    if (!api || !selectedSession) {
+    if (!api || !selectedSession || submitInFlightRef.current) {
       return;
     }
 
@@ -96,6 +106,7 @@ export function useSessionComposer(params: UseSessionComposerParams) {
     }
 
     const previousDraft = composerDraft;
+    submitInFlightRef.current = true;
     setComposerDraft("");
     setAttachmentsClearedOnSubmit(true);
     void (async () => {
@@ -107,12 +118,13 @@ export function useSessionComposer(params: UseSessionComposerParams) {
       if (composerDraftRef.current === "") {
         setComposerDraft(nextState.composerDraft);
       }
-      setAttachmentsClearedOnSubmit(false);
     })().catch(() => {
       if (composerDraftRef.current === "") {
         setComposerDraft(previousDraft);
       }
+    }).finally(() => {
       setAttachmentsClearedOnSubmit(false);
+      submitInFlightRef.current = false;
     });
   };
 
@@ -236,25 +248,32 @@ export function useSessionComposer(params: UseSessionComposerParams) {
       return;
     }
 
-    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && selectedSession?.status === "running") {
-      event.preventDefault();
-      submitComposerDraft({ deliverAs: (event.metaKey || event.ctrlKey) ? "steer" : "followUp" });
+    if (event.nativeEvent.isComposing) {
       return;
     }
 
-    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
+    if (shortcutMatches(event, shortcutBindings.newLine, api?.platform ?? "win32")) {
+      if (event.key !== "Enter") {
+        event.preventDefault();
+        const insertion = insertTextAtSelection(event.currentTarget, composerDraft, "\n");
+        setComposerDraft(insertion.value);
+        window.requestAnimationFrame(() => event.currentTarget.setSelectionRange(insertion.cursor, insertion.cursor));
+      }
+      return;
+    }
+
+    if (shortcutMatches(event, shortcutBindings.sendMessage, api?.platform ?? "win32")) {
+      event.preventDefault();
+      submitComposerDraft({ deliverAs: selectedSession?.status === "running" && (event.metaKey || event.ctrlKey) ? "steer" : "followUp" });
+      return;
+    }
+
+    if (event.key !== "Enter" || event.shiftKey || selectedSession?.status !== "running" || (!event.metaKey && !event.ctrlKey)) {
       return;
     }
 
     event.preventDefault();
-    if (!composerDraft.trim() && composerAttachments.length === 0) {
-      return;
-    }
-    if (requiresModelSelection) {
-      return;
-    }
-
-    submitComposerDraft();
+    submitComposerDraft({ deliverAs: "steer" });
   };
 
   return {

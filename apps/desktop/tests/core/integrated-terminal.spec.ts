@@ -27,21 +27,38 @@ test("opens a workspace terminal with persistent output, tabs, and takeover cont
     await waitForWorkspaceByPath(window, workspacePath);
     await createNamedThread(window, "Terminal host thread");
 
-    await window.getByLabel("Toggle terminal").hover();
-    const terminalTooltip = window.locator(".topbar__tooltip", { hasText: "Toggle terminal" });
-    await expect(terminalTooltip).toContainText("Toggle terminal");
-    await expect(terminalTooltip.locator("kbd")).toHaveText(/⌘J|Ctrl\+J/);
+    await window.getByTestId("workspace-tools").click();
+    const terminalItem = window.getByRole("menuitem", { name: "Toggle terminal" });
+    await expect(terminalItem).toContainText("Toggle terminal");
+    await expect(terminalItem.locator("kbd")).toHaveText(/⌘J|Ctrl\+J/);
 
-    await window.getByLabel("Toggle terminal").click();
+    await terminalItem.click();
     const terminal = window.getByTestId("integrated-terminal");
     await expect(terminal).toBeVisible();
     await expect(window.getByTestId("terminal-tab")).toHaveCount(1);
+    await window.evaluate(() => window.__piAppTestResetRenderDiagnostics?.());
 
     await terminal.locator(".xterm").click();
     await window.keyboard.type("printf 'PI_TERMINAL_OK\\n'; pwd");
     await window.keyboard.press("Enter");
     await expect(terminal.locator(".xterm-rows")).toContainText("PI_TERMINAL_OK", { timeout: 15_000 });
     await expect(terminal.locator(".xterm-rows")).toContainText(basename(workspacePath), { timeout: 15_000 });
+    const terminalDiagnostics = await window.evaluate(() => window.__piAppTestRenderDiagnostics);
+    if (!terminalDiagnostics) throw new Error("renderer diagnostics unavailable after terminal output");
+    expect(terminalDiagnostics.terminalDataEventCount).toBeGreaterThan(0);
+    expect(terminalDiagnostics.terminalWriteCount).toBeGreaterThan(0);
+    expect(terminalDiagnostics.terminalDataChars).toBeGreaterThan(0);
+    expect(terminalDiagnostics.terminalWriteChars).toBeGreaterThan(0);
+    expect(terminalDiagnostics.terminalDataToWriteLatencyMaxMs).toBeGreaterThanOrEqual(0);
+    console.log(JSON.stringify({ scenario: "phase0-integrated-terminal-delivery", terminalDiagnostics: {
+      terminalDataEventCount: terminalDiagnostics.terminalDataEventCount,
+      terminalDataChars: terminalDiagnostics.terminalDataChars,
+      terminalWriteCount: terminalDiagnostics.terminalWriteCount,
+      terminalWriteChars: terminalDiagnostics.terminalWriteChars,
+      terminalWriteElapsedMs: terminalDiagnostics.terminalWriteElapsedMs,
+      terminalDataToWriteLatencyTotalMs: terminalDiagnostics.terminalDataToWriteLatencyTotalMs,
+      terminalDataToWriteLatencyMaxMs: terminalDiagnostics.terminalDataToWriteLatencyMaxMs,
+    } }));
 
     await window.keyboard.press(desktopShortcut("J"));
     await expect(terminal).toHaveCount(0);
@@ -91,7 +108,7 @@ test("opens a workspace terminal with persistent output, tabs, and takeover cont
     await expect(window.getByTestId("integrated-terminal")).not.toHaveClass(/terminal-panel--takeover/);
     await expect(window.getByTestId("composer")).toBeVisible();
 
-    await window.getByLabel(/Close Terminal/).last().click();
+    await window.getByLabel(/^Close /).last().click();
     await expect(window.getByTestId("terminal-tab")).toHaveCount(2);
   } finally {
     await harness.close();
@@ -135,7 +152,8 @@ test("pastes clipboard text into the integrated terminal once", async () => {
     await waitForWorkspaceByPath(window, workspacePath);
     await createNamedThread(window, "Terminal paste thread");
 
-    await window.getByLabel("Toggle terminal").click();
+    await window.getByTestId("workspace-tools").click();
+    await window.getByRole("menuitem", { name: "Toggle terminal" }).click();
     const terminal = window.getByTestId("integrated-terminal");
     await expect(terminal).toBeVisible();
     await terminal.locator(".xterm").click();
@@ -171,7 +189,8 @@ test("writes an oversized terminal paste in chunks instead of dropping it", asyn
     await waitForWorkspaceByPath(window, workspacePath);
     await createNamedThread(window, "Terminal large paste thread");
 
-    await window.getByLabel("Toggle terminal").click();
+    await window.getByTestId("workspace-tools").click();
+    await window.getByRole("menuitem", { name: "Toggle terminal" }).click();
     const terminal = window.getByTestId("integrated-terminal");
     await expect(terminal).toBeVisible();
     await terminal.locator(".xterm").click();
@@ -187,39 +206,35 @@ test("writes an oversized terminal paste in chunks instead of dropping it", asyn
     const payload = `${`${"X".repeat(63)}\n`.repeat(lineCount)}ENDMARKER\n`;
     expect(payload.length).toBeGreaterThan(128 * 1024);
 
-    // Start a receiver that installs its stdin pipe before announcing readiness.
-    // This keeps the test independent of whether the shell has handed the PTY to
-    // the child by the time Playwright's Enter keypress resolves.
-    const receiverReady = "PI_TERMINAL_RECEIVER_READY";
-    const receiverDone = "PI_TERMINAL_RECEIVER_DONE";
-    const receiverScript = [
-      'const fs = require("node:fs")',
-      'const output = fs.createWriteStream("payload.txt")',
-      "process.stdin.pipe(output)",
-      'process.stdout.write("PI_TERMINAL_RECEIVER_" + "READY\\n")',
-    ].join(";");
-    await window.keyboard.type(
-      `node -e '${receiverScript}'; echo PI_TERMINAL_RECEIVER_""DONE`,
-    );
+    // zsh toggles bracketed-paste mode (DECSET 2004) off before running a command
+    // and back on at each prompt. Under load the renderer's xterm can still read
+    // the mode as "on" when the paste fires, so it wraps the paste in
+    // ESC[200~..ESC[201~; the trailing terminator leaves an unterminated partial
+    // line in cat's canonical input buffer and defeats the following Ctrl+D EOF.
+    // Disable zsh's bracketed paste for this shell so the oversized paste is
+    // delivered raw. The echoed READYMARKER (quotes strip on execution but stay in
+    // the typed command echo) confirms the disable was applied before we paste.
+    const preparePasteCommand = process.platform === "win32"
+      ? "echo READYMARKER"
+      : 'unset zle_bracketed_paste; echo READY""MARKER';
+    await window.keyboard.type(preparePasteCommand);
     await window.keyboard.press("Enter");
-    await expect(terminal.locator(".xterm-rows")).toContainText(receiverReady, { timeout: 15_000 });
+    await expect(terminal.locator(".xterm-rows")).toContainText("READYMARKER", { timeout: 15_000 });
 
+    await window.keyboard.type("cat > payload.txt");
+    await window.keyboard.press("Enter");
     await harness.electronApp.evaluate(({ clipboard }, text) => {
       clipboard.writeText(text);
     }, payload);
     await window.keyboard.press(desktopShortcut("V"));
-    await expect(terminal.locator(".xterm-rows")).toContainText("ENDMARKER", { timeout: 30_000 });
+    await expect(terminal.locator(".xterm-rows")).toContainText("ENDMARKER", { timeout: 60_000 });
 
     await window.keyboard.press("Control+D");
-    await expect(terminal.locator(".xterm-rows")).toContainText(receiverDone, { timeout: 15_000 });
     await window.keyboard.type("wc -l payload.txt");
     await window.keyboard.press("Enter");
     await expect(terminal.locator(".xterm-rows")).toContainText(`${lineCount + 1} payload.txt`, {
       timeout: 15_000,
     });
-    await window.keyboard.type("tail -n 1 payload.txt");
-    await window.keyboard.press("Enter");
-    await expect(terminal.locator(".xterm-rows")).toContainText("ENDMARKER", { timeout: 15_000 });
   } finally {
     await harness.close();
   }

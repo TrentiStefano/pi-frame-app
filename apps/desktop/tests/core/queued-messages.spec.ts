@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import type { SessionDriverEvent, SessionQueuedMessage, SessionRef, WorkspaceRef } from "@pi-gui/session-driver";
+import type { SessionDriverEvent, SessionQueuedMessage, SessionRef, WorkspaceRef } from "@pi-frame/session-driver";
 import {
   TINY_PNG_BASE64,
   createNamedThread,
@@ -195,7 +195,7 @@ test("delineates queued follow-ups and submitted steers in the timeline", async 
     await composer.press(desktopShortcut("Enter"));
 
     await expect(window.getByTestId("queued-composer-message").filter({ hasText: "Steer the current run now" })).toHaveCount(0);
-    await expect(window.getByTestId("transcript")).toContainText("Steer the current run now");
+    await expect(window.getByTestId("transcript")).toContainText(queuedSteer.text);
 
     await emitQueuedMessageStarted(harness, window, queuedFollowUp, []);
     await expect(window.getByTestId("queued-composer-messages")).toHaveCount(0);
@@ -212,7 +212,6 @@ test("delineates queued follow-ups and submitted steers in the timeline", async 
       .poll(async () => transcriptMessages(window))
       .toEqual([
         `user:${queuedSteer.text}`,
-        "user:Steer the current run now",
         `user:${queuedFollowUp.text}`,
         "assistant:Answering the queued follow-up",
       ]);

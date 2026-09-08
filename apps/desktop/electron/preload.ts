@@ -2,30 +2,44 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { PRELOAD_DEV_RELOAD_MARKER } from "./dev-reload-preload-probe";
 import {
   desktopIpc,
+  type AssistantStreamPatch,
   type CustomProviderConfig,
+  type SessionMetadataPatch,
   type CustomProviderProbeInput,
   type CustomProviderProbeResult,
-  type ChangedFilesResult,
+  type DeleteModelConfigurationInput,
   type DesktopNotificationPermissionStatus,
   type WorkspaceFilePreview,
+  type ShowApplicationMenuInput,
   type PiDesktopCommand,
   type TerminalDataEvent,
   type TerminalErrorEvent,
   type TerminalExitEvent,
   type TerminalPanelSnapshot,
   type TerminalSize,
+  type MicrophonePermissionStatus,
+  type ModelConfigurationDefaultsInput,
+  type ModelConfigurationSnapshot,
+  type PiDesktopApi,
+  type PiDesktopBrowserElementListener,
+  type PiDesktopBrowserStateListener,
+  type SaveModelConfigurationInput,
+  type VoiceTranscriptionInput,
+  type VoiceTranscriptionResult,
 } from "../src/ipc";
+import type { InstallCapabilityPackageInput, SetCapabilityConnectorInput } from "../src/capability-types";
 import type {
   NavigateSessionTreeOptions,
   NavigateSessionTreeResult,
   SessionTreeSnapshot,
-} from "@pi-gui/session-driver/types";
+} from "@pi-frame/session-driver/types";
 import type {
   HostUiResponse,
-} from "@pi-gui/session-driver";
-import type { RuntimeSettingsSnapshot } from "@pi-gui/session-driver/runtime-types";
+} from "@pi-frame/session-driver";
+import type { RuntimeSettingsSnapshot } from "@pi-frame/session-driver/runtime-types";
 import type {
   AppView,
+  AppLanguage,
   ComposerAttachment,
   ComposerImageAttachment,
   CreateSessionInput,
@@ -38,11 +52,21 @@ import type {
   SetChildSupervisionLoopInput,
   SelectedTranscriptRecord,
   StartThreadInput,
-  ThemePresetId,
+  ThemeMode,
   WorkspaceSessionTarget,
 } from "../src/desktop-state";
+import type { BrowserCommand, BrowserSessionState, BrowserSessionTarget, BrowserSurfaceBounds } from "../src/browser-types";
+import { isAppLanguage } from "../src/i18n/resources";
 
 const devReloadMarkersEnabled = process.env.PI_APP_DEV_RELOAD_MARKERS === "1";
+const initialAppLanguageArgument = process.argv
+  .find((argument) => argument.startsWith("--pi-app-language="))
+  ?.slice("--pi-app-language=".length);
+const initialAppLanguage: AppLanguage = isAppLanguage(initialAppLanguageArgument) ? initialAppLanguageArgument : "en";
+const initialThemeArgument = process.argv
+  .find((argument) => argument.startsWith("--pi-app-theme="))
+  ?.slice("--pi-app-theme=".length);
+const initialResolvedTheme = initialThemeArgument === "dark" ? "dark" : "light";
 
 function resolveDevReloadMarkers() {
   if (!devReloadMarkersEnabled) {
@@ -55,6 +79,11 @@ function resolveDevReloadMarkers() {
 }
 
 const devReloadMarkers = resolveDevReloadMarkers();
+
+// Narrow, test-only signal for content-safe renderer profiling. Not exposed in production.
+if (process.env.PI_APP_TEST_MODE) {
+  contextBridge.exposeInMainWorld("__piAppTestMode", true);
+}
 
 if (devReloadMarkers) {
   contextBridge.exposeInMainWorld("__piDevReloadHost", devReloadMarkers);
@@ -71,6 +100,8 @@ function subscribeIpc<T>(channel: string, listener: (payload: T) => void): () =>
 contextBridge.exposeInMainWorld("piApp", {
   platform: process.platform,
   versions: process.versions,
+  initialAppLanguage,
+  initialResolvedTheme,
   ping: () => ipcRenderer.invoke(desktopIpc.ping) as Promise<string>,
   getState: () => ipcRenderer.invoke(desktopIpc.stateRequest) as Promise<DesktopAppState>,
   onStateChanged: (listener: (state: DesktopAppState) => void) => {
@@ -91,6 +122,24 @@ contextBridge.exposeInMainWorld("piApp", {
     ipcRenderer.on(desktopIpc.selectedTranscriptChanged, handle);
     return () => {
       ipcRenderer.removeListener(desktopIpc.selectedTranscriptChanged, handle);
+    };
+  },
+  onAssistantStreamPatch: (listener: (patch: AssistantStreamPatch) => void) => {
+    const handle = (_event: Electron.IpcRendererEvent, patch: AssistantStreamPatch) => {
+      listener(patch);
+    };
+    ipcRenderer.on(desktopIpc.assistantStreamPatch, handle);
+    return () => {
+      ipcRenderer.removeListener(desktopIpc.assistantStreamPatch, handle);
+    };
+  },
+  onSessionMetadataPatch: (listener: (patch: SessionMetadataPatch) => void) => {
+    const handle = (_event: Electron.IpcRendererEvent, patch: SessionMetadataPatch) => {
+      listener(patch);
+    };
+    ipcRenderer.on(desktopIpc.sessionMetadataPatch, handle);
+    return () => {
+      ipcRenderer.removeListener(desktopIpc.sessionMetadataPatch, handle);
     };
   },
   onCommand: (listener: (command: PiDesktopCommand) => void) => {
@@ -154,6 +203,8 @@ contextBridge.exposeInMainWorld("piApp", {
     ipcRenderer.invoke(desktopIpc.archiveSession, target) as Promise<DesktopAppState>,
   unarchiveSession: (target: WorkspaceSessionTarget) =>
     ipcRenderer.invoke(desktopIpc.unarchiveSession, target) as Promise<DesktopAppState>,
+  deleteSession: (target: WorkspaceSessionTarget) =>
+    ipcRenderer.invoke(desktopIpc.deleteSession, target) as Promise<DesktopAppState>,
   markSessionRead: (target: WorkspaceSessionTarget) =>
     ipcRenderer.invoke(desktopIpc.markSessionRead, target) as Promise<DesktopAppState>,
   setSessionPinned: (target: WorkspaceSessionTarget, pinned: boolean) =>
@@ -173,10 +224,36 @@ contextBridge.exposeInMainWorld("piApp", {
     ipcRenderer.invoke(desktopIpc.setActiveView, view) as Promise<DesktopAppState>,
   setSidebarCollapsed: (collapsed: boolean) =>
     ipcRenderer.invoke(desktopIpc.setSidebarCollapsed, collapsed) as Promise<DesktopAppState>,
+  setWorkspaceCollapsed: (workspaceId: string, collapsed: boolean) =>
+    ipcRenderer.invoke(desktopIpc.setWorkspaceCollapsed, workspaceId, collapsed) as Promise<DesktopAppState>,
   refreshRuntime: (workspaceId?: string) =>
     ipcRenderer.invoke(desktopIpc.refreshRuntime, workspaceId) as Promise<DesktopAppState>,
-  setModelSettingsScopeMode: (mode: "app-global" | "per-repo") =>
-    ipcRenderer.invoke(desktopIpc.setModelSettingsScopeMode, mode) as Promise<DesktopAppState>,
+  getCapabilityCenter: (refresh?: boolean) =>
+    ipcRenderer.invoke(desktopIpc.getCapabilityCenter, refresh) as ReturnType<PiDesktopApi["getCapabilityCenter"]>,
+  listCapabilityPackages: (workspaceId: string) =>
+    ipcRenderer.invoke(desktopIpc.listCapabilityPackages, workspaceId) as ReturnType<PiDesktopApi["listCapabilityPackages"]>,
+  installCapabilityPackage: (input: InstallCapabilityPackageInput) =>
+    ipcRenderer.invoke(desktopIpc.installCapabilityPackage, input) as Promise<DesktopAppState>,
+  removeCapabilityPackage: (input: InstallCapabilityPackageInput) =>
+    ipcRenderer.invoke(desktopIpc.removeCapabilityPackage, input) as Promise<DesktopAppState>,
+  setCapabilityConnector: (workspaceId: string, input: SetCapabilityConnectorInput) =>
+    ipcRenderer.invoke(desktopIpc.setCapabilityConnector, workspaceId, input) as Promise<DesktopAppState>,
+  reconnectCapabilityConnector: (workspaceId: string, connectorId: string) =>
+    ipcRenderer.invoke(desktopIpc.reconnectCapabilityConnector, workspaceId, connectorId) as Promise<DesktopAppState>,
+  checkForUpdates: (workspaceId?: string) =>
+    ipcRenderer.invoke(desktopIpc.checkForUpdates, workspaceId) as ReturnType<PiDesktopApi["checkForUpdates"]>,
+  installAppUpdate: () =>
+    ipcRenderer.invoke(desktopIpc.installAppUpdate) as Promise<void>,
+  updateExtensions: (workspaceId: string, sources?: readonly string[]) =>
+    ipcRenderer.invoke(desktopIpc.updateExtensions, workspaceId, sources) as Promise<DesktopAppState>,
+  getModelConfiguration: () =>
+    ipcRenderer.invoke(desktopIpc.getModelConfiguration) as Promise<ModelConfigurationSnapshot>,
+  saveModelConfiguration: (input: SaveModelConfigurationInput) =>
+    ipcRenderer.invoke(desktopIpc.saveModelConfiguration, input) as Promise<DesktopAppState>,
+  deleteModelConfiguration: (input: DeleteModelConfigurationInput) =>
+    ipcRenderer.invoke(desktopIpc.deleteModelConfiguration, input) as Promise<DesktopAppState>,
+  setModelConfigurationDefaults: (input: ModelConfigurationDefaultsInput) =>
+    ipcRenderer.invoke(desktopIpc.setModelConfigurationDefaults, input) as Promise<DesktopAppState>,
   setDefaultModel: (workspaceId: string, provider: string, modelId: string) =>
     ipcRenderer.invoke(desktopIpc.setDefaultModel, workspaceId, provider, modelId) as Promise<DesktopAppState>,
   setDefaultThinkingLevel: (workspaceId: string, thinkingLevel: RuntimeSettingsSnapshot["defaultThinkingLevel"]) =>
@@ -191,8 +268,6 @@ contextBridge.exposeInMainWorld("piApp", {
     ipcRenderer.invoke(desktopIpc.logoutProvider, workspaceId, providerId) as Promise<DesktopAppState>,
   setProviderApiKey: (workspaceId: string, providerId: string, apiKey: string) =>
     ipcRenderer.invoke(desktopIpc.setProviderApiKey, workspaceId, providerId, apiKey) as Promise<DesktopAppState>,
-  listCustomProviders: () =>
-    ipcRenderer.invoke(desktopIpc.listCustomProviders) as Promise<readonly CustomProviderConfig[]>,
   setCustomProvider: (workspaceId: string, config: CustomProviderConfig) =>
     ipcRenderer.invoke(desktopIpc.setCustomProvider, workspaceId, config) as Promise<DesktopAppState>,
   deleteCustomProvider: (workspaceId: string, providerId: string) =>
@@ -211,12 +286,14 @@ contextBridge.exposeInMainWorld("piApp", {
     ipcRenderer.invoke(desktopIpc.respondToHostUiRequest, workspaceId, sessionId, response) as Promise<DesktopAppState>,
   setNotificationPreferences: (preferences: Partial<NotificationPreferences>) =>
     ipcRenderer.invoke(desktopIpc.setNotificationPreferences, preferences) as Promise<DesktopAppState>,
+  setAppLanguage: (language: AppLanguage) =>
+    ipcRenderer.invoke(desktopIpc.setAppLanguage, language) as Promise<DesktopAppState>,
   setIntegratedTerminalShell: (shellPath: string) =>
     ipcRenderer.invoke(desktopIpc.setIntegratedTerminalShell, shellPath) as Promise<DesktopAppState>,
-  setEnableTransparency: (enabled: boolean) =>
-    ipcRenderer.invoke(desktopIpc.setEnableTransparency, enabled) as Promise<DesktopAppState>,
-  setThemePresetId: (presetId: ThemePresetId) =>
-    ipcRenderer.invoke(desktopIpc.setThemePresetId, presetId) as Promise<DesktopAppState>,
+  setShortcutBindings: (bindings: DesktopAppState["shortcutBindings"]) =>
+    ipcRenderer.invoke(desktopIpc.setShortcutBindings, bindings) as Promise<DesktopAppState>,
+  setComputerUseEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke(desktopIpc.setComputerUseEnabled, enabled) as Promise<DesktopAppState>,
   ensureTerminalPanel: (workspaceId: string, terminalScopeId: string, size?: Partial<TerminalSize>) =>
     ipcRenderer.invoke(desktopIpc.terminalEnsurePanel, workspaceId, terminalScopeId, size) as Promise<TerminalPanelSnapshot>,
   createTerminalSession: (workspaceId: string, terminalScopeId: string, size?: Partial<TerminalSize>) =>
@@ -233,8 +310,8 @@ contextBridge.exposeInMainWorld("piApp", {
     ipcRenderer.invoke(desktopIpc.terminalCloseSession, terminalId) as Promise<TerminalPanelSnapshot | null>,
   setTerminalTitle: (terminalId: string, title: string) =>
     ipcRenderer.invoke(desktopIpc.terminalSetTitle, terminalId, title) as Promise<void>,
-  setTerminalFocused: (focused: boolean) => {
-    ipcRenderer.send(desktopIpc.terminalSetFocused, focused);
+  setTerminalFocused: (focused: boolean, terminalId?: string) => {
+    ipcRenderer.send(desktopIpc.terminalSetFocused, focused, terminalId);
     return Promise.resolve();
   },
   onTerminalData: (listener: (event: TerminalDataEvent) => void) =>
@@ -256,8 +333,25 @@ contextBridge.exposeInMainWorld("piApp", {
       ipcRenderer.removeListener(desktopIpc.notificationPermissionStatusChanged, handler);
     };
   },
+  getBrowserState: (target: BrowserSessionTarget) =>
+    ipcRenderer.invoke(desktopIpc.browserGetState, target) as Promise<BrowserSessionState>,
+  sendBrowserCommand: (target: BrowserSessionTarget, command: BrowserCommand) =>
+    ipcRenderer.invoke(desktopIpc.browserCommand, target, command) as Promise<BrowserSessionState>,
+  setBrowserSurface: (input: BrowserSurfaceBounds) =>
+    ipcRenderer.invoke(desktopIpc.browserSetSurface, input) as Promise<BrowserSessionState>,
+  onBrowserStateChanged: (listener: PiDesktopBrowserStateListener) =>
+    subscribeIpc(desktopIpc.browserStateChanged, listener),
+  onBrowserElementSelected: (listener: PiDesktopBrowserElementListener) =>
+    subscribeIpc(desktopIpc.browserElementSelected, listener),
+  requestMicrophonePermission: () =>
+    ipcRenderer.invoke(desktopIpc.requestMicrophonePermission) as Promise<MicrophonePermissionStatus>,
+  transcribeVoice: (input: VoiceTranscriptionInput) =>
+    ipcRenderer.invoke(desktopIpc.transcribeVoice, input) as Promise<VoiceTranscriptionResult>,
+  cancelVoiceTranscription: (requestId: string) =>
+    ipcRenderer.invoke(desktopIpc.cancelVoiceTranscription, requestId) as Promise<void>,
   pickComposerAttachments: () => ipcRenderer.invoke(desktopIpc.pickComposerAttachments) as Promise<DesktopAppState>,
   readClipboardImage: () => ipcRenderer.sendSync(desktopIpc.readClipboardImage) as ComposerImageAttachment | null,
+  readClipboardText: () => ipcRenderer.sendSync(desktopIpc.readClipboardText) as string,
   addComposerAttachments: (attachments: readonly ComposerAttachment[]) =>
     ipcRenderer.invoke(desktopIpc.addComposerAttachments, attachments) as Promise<DesktopAppState>,
   removeComposerAttachment: (attachmentId: string) =>
@@ -272,7 +366,10 @@ contextBridge.exposeInMainWorld("piApp", {
     ipcRenderer.invoke(desktopIpc.steerQueuedComposerMessage, messageId) as Promise<DesktopAppState>,
   updateComposerDraft: (composerDraft: string) =>
     ipcRenderer.invoke(desktopIpc.updateComposerDraft, composerDraft) as Promise<DesktopAppState>,
-  submitComposer: (text: string, options?: { readonly deliverAs?: "steer" | "followUp" }) =>
+  submitComposer: (text: string, options?: {
+    readonly deliverAs?: "steer" | "followUp";
+    readonly preserveComposer?: boolean;
+  }) =>
     ipcRenderer.invoke(desktopIpc.submitComposer, text, options) as Promise<DesktopAppState>,
   getSessionTree: (target: WorkspaceSessionTarget) =>
     ipcRenderer.invoke(desktopIpc.getSessionTree, target) as Promise<SessionTreeSnapshot>,
@@ -286,17 +383,25 @@ contextBridge.exposeInMainWorld("piApp", {
   readWorkspaceFile: (workspaceId: string, filePath: string) =>
     ipcRenderer.invoke(desktopIpc.readWorkspaceFile, workspaceId, filePath) as Promise<WorkspaceFilePreview>,
   getChangedFiles: (workspaceId: string) =>
-    ipcRenderer.invoke(desktopIpc.getChangedFiles, workspaceId) as Promise<ChangedFilesResult>,
+    ipcRenderer.invoke(desktopIpc.getChangedFiles, workspaceId) as Promise<{ path: string; status: "added" | "modified" | "deleted" | "untracked"; staged: boolean }[]>,
   getFileDiff: (workspaceId: string, filePath: string) =>
     ipcRenderer.invoke(desktopIpc.getFileDiff, workspaceId, filePath) as Promise<string>,
-  stageFile: (workspaceId: string, filePath: string, stagingSourcePath?: string) =>
-    ipcRenderer.invoke(desktopIpc.stageFile, workspaceId, filePath, stagingSourcePath) as Promise<void>,
+  stageFile: (workspaceId: string, filePath: string) =>
+    ipcRenderer.invoke(desktopIpc.stageFile, workspaceId, filePath) as Promise<void>,
+  showApplicationMenu: (input: ShowApplicationMenuInput) =>
+    ipcRenderer.invoke(desktopIpc.showApplicationMenu, input) as Promise<boolean>,
   toggleWindowMaximize: () => ipcRenderer.invoke(desktopIpc.toggleWindowMaximize) as Promise<void>,
   openExternal: (url: string) => ipcRenderer.invoke(desktopIpc.openExternal, url) as Promise<void>,
-  getThemeMode: () => ipcRenderer.invoke(desktopIpc.getThemeMode) as Promise<"system" | "light" | "dark">,
+  getThemeMode: () => ipcRenderer.invoke(desktopIpc.getThemeMode) as Promise<ThemeMode>,
   getResolvedTheme: () => ipcRenderer.invoke(desktopIpc.getResolvedTheme) as Promise<"light" | "dark">,
-  setThemeMode: (mode: "system" | "light" | "dark") =>
+  setThemeMode: (mode: ThemeMode) =>
     ipcRenderer.invoke(desktopIpc.setThemeMode, mode) as Promise<DesktopAppState>,
+  setThemeId: (themeId: string) =>
+    ipcRenderer.invoke(desktopIpc.setThemeId, themeId) as Promise<DesktopAppState>,
+  importVSCodeTheme: () =>
+    ipcRenderer.invoke(desktopIpc.importVSCodeTheme) as Promise<DesktopAppState | null>,
+  deleteCustomTheme: (themeId: string) =>
+    ipcRenderer.invoke(desktopIpc.deleteCustomTheme, themeId) as Promise<DesktopAppState>,
   onThemeChanged: (callback: (theme: "light" | "dark") => void) => {
     const handler = (_event: Electron.IpcRendererEvent, theme: "light" | "dark") => callback(theme);
     ipcRenderer.on(desktopIpc.themeChanged, handler);

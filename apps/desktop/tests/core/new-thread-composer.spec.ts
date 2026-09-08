@@ -11,6 +11,7 @@ import {
   openNewThread,
   pasteTinyPng,
   seedAgentDir,
+  waitForWorkspaceByPath,
 } from "../helpers/electron-app";
 
 test("new thread reuses composer behaviors for slash commands, image previews, and branding", async () => {
@@ -30,13 +31,27 @@ test("new thread reuses composer behaviors for slash commands, image previews, a
     await openNewThread(window);
 
     const composer = window.getByTestId("new-thread-composer");
-    await expect(window.getByTestId("new-thread-logo")).toBeVisible();
+    const brandLogo = window.getByTestId("new-thread-logo");
+    await expect(brandLogo).toBeVisible();
+    await expect.poll(() => brandLogo.locator("img").evaluate((image) => image.naturalWidth)).toBeGreaterThan(0);
+    await expect(brandLogo.locator("svg")).toHaveCount(0);
     await expect(window.getByRole("heading", { name: "Let's build" })).toBeVisible();
     await expect(composer).toBeFocused();
     await expect(composer).toHaveAttribute("placeholder", "Ask pi anything, use / for commands and skills");
 
     const modelBadge = window.locator(".new-thread__hint .model-selector__badge").first();
     await expect(modelBadge).toBeVisible();
+    await expect(window.locator(".new-thread__hint button")).toHaveCount(4);
+    const environmentPicker = window.getByTestId("new-thread-environment-picker");
+    await expect(environmentPicker).toContainText("Local");
+    await environmentPicker.click();
+    const environmentMenu = window.locator(".new-thread__environment-picker [role='menu']");
+    await expect(environmentMenu).toBeVisible();
+    await environmentMenu.getByRole("menuitemradio", { name: /Worktree/ }).click();
+    await expect(environmentPicker).toContainText("Worktree");
+    await environmentPicker.click();
+    await environmentMenu.getByRole("menuitemradio", { name: /Local/ }).click();
+    await expect(environmentPicker).toContainText("Local");
     await expect(window.locator('.new-thread input[type="file"]')).toBeHidden();
 
     await composer.fill("/stat");
@@ -80,6 +95,101 @@ test("new thread reuses composer behaviors for slash commands, image previews, a
   }
 });
 
+test("starts only one thread when Enter is pressed twice", async () => {
+  const userDataDir = await makeUserDataDir();
+  const agentDir = join(userDataDir, "agent");
+  const workspacePath = await makeWorkspace("new-thread-double-enter");
+  await seedAgentDir(agentDir);
+  const harness = await launchDesktop(userDataDir, {
+    agentDir,
+    initialWorkspaces: [workspacePath],
+    testMode: "background",
+  });
+
+  try {
+    const window = await harness.firstWindow();
+    await openNewThread(window);
+    const before = await getDesktopState(window);
+    const composer = window.getByTestId("new-thread-composer");
+    await composer.fill("create exactly one thread");
+
+    await composer.press("Enter");
+    await composer.press("Enter");
+
+    await expect(window.getByTestId("composer")).toBeVisible({ timeout: 15_000 });
+    await expect.poll(async () => {
+      const state = await getDesktopState(window);
+      return state.workspaces.reduce((count, workspace) => count + workspace.sessions.length, 0);
+    }).toBe(before.workspaces.reduce((count, workspace) => count + workspace.sessions.length, 0) + 1);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("new thread project picker switches projects with desktop menu keyboard behavior", async () => {
+  test.setTimeout(60_000);
+  const userDataDir = await makeUserDataDir();
+  const agentDir = join(userDataDir, "agent");
+  const workspacePathA = await makeWorkspace("new-thread-project-alpha");
+  const workspacePathB = await makeWorkspace("new-thread-project-beta");
+  await seedAgentDir(agentDir);
+  const harness = await launchDesktop(userDataDir, {
+    agentDir,
+    initialWorkspaces: [workspacePathA, workspacePathB],
+    testMode: "background",
+  });
+
+  try {
+    const window = await harness.firstWindow();
+    const workspaceA = await waitForWorkspaceByPath(window, workspacePathA);
+    const workspaceB = await waitForWorkspaceByPath(window, workspacePathB);
+    await openNewThread(window);
+
+    const trigger = window.getByTestId("new-thread-workspace-picker");
+    const currentId = await trigger.getAttribute("data-workspace-id");
+    const currentWorkspace = [workspaceA, workspaceB].find((workspace) => workspace.id === currentId);
+    if (!currentWorkspace) {
+      throw new Error(`Unexpected selected project: ${currentId ?? "none"}`);
+    }
+    const nextWorkspace = currentWorkspace.id === workspaceA.id ? workspaceB : workspaceA;
+    await expect(trigger).toContainText(currentWorkspace.name);
+
+    await trigger.click();
+    const menu = window.getByRole("menu", { name: "Choose a project" });
+    const selectedOption = menu.getByRole("menuitemradio", { name: currentWorkspace.name, exact: true });
+    await expect(menu).toBeVisible();
+    await expect(selectedOption).toHaveAttribute("aria-checked", "true");
+    await expect(selectedOption).toBeFocused();
+
+    const navigationKey = currentWorkspace.id === workspaceA.id ? "ArrowDown" : "ArrowUp";
+    await selectedOption.press(navigationKey);
+    const nextOption = menu.getByRole("menuitemradio", { name: nextWorkspace.name, exact: true });
+    await expect(nextOption).toBeFocused();
+    await nextOption.press("Enter");
+
+    await expect(menu).toHaveCount(0);
+    await expect(trigger).toHaveAttribute("data-workspace-id", nextWorkspace.id);
+    await expect(trigger).toContainText(nextWorkspace.name);
+    await expect(trigger).toBeFocused();
+
+    await trigger.press("ArrowDown");
+    await expect(menu).toBeVisible();
+    await expect(menu.getByRole("menuitemradio", { name: nextWorkspace.name, exact: true })).toBeFocused();
+    await window.keyboard.press("Tab");
+    await expect(menu).toHaveCount(0);
+    await expect(window.getByTestId("new-thread-environment-picker")).toBeFocused();
+
+    await trigger.focus();
+    await trigger.press("ArrowUp");
+    await expect(menu).toBeVisible();
+    await window.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+  } finally {
+    await harness.close();
+  }
+});
+
 test("new thread hides the onboarding notice after picking a thread model", async () => {
   test.setTimeout(60_000);
   const userDataDir = await makeUserDataDir();
@@ -94,6 +204,11 @@ test("new thread hides the onboarding notice after picking a thread model", asyn
 
   try {
     const window = await harness.firstWindow();
+    await window.evaluate(async () => {
+      const app = window.piApp;
+      if (!app) throw new Error("piApp IPC bridge is unavailable");
+      await app.setModelConfigurationDefaults({ providerId: "", modelId: "" });
+    });
     await openNewThread(window);
 
     const notice = window.getByTestId("model-onboarding-notice");
@@ -117,7 +232,7 @@ test("new thread hides the onboarding notice after picking a thread model", asyn
     await modelFilter.fill("4o");
     await expect(dropdown).toContainText("GPT-4o");
     await expect(dropdown).not.toContainText("GPT-5");
-    await dropdown.getByRole("button", { name: /GPT-4o/ }).click();
+    await dropdown.getByRole("menuitemradio", { name: /GPT-4o/ }).click();
 
     await expect(modelBadge).toHaveText("openai:gpt-4o");
     await expect(startButton).toBeEnabled();
@@ -184,7 +299,7 @@ test("new thread routes disabled-model recovery to settings models", async () =>
   }
 });
 
-test("refreshing after a provider becomes available auto-enables that provider's models", async () => {
+test("refreshing provider auth does not add the provider's full model catalog", async () => {
   test.setTimeout(60_000);
   const userDataDir = await makeUserDataDir();
   const agentDir = join(userDataDir, "agent");
@@ -210,7 +325,7 @@ test("refreshing after a provider becomes available auto-enables that provider's
     const modelBadge = window.locator(".new-thread__hint .model-selector__badge").first();
     await composer.fill("connect provider");
     await expect(modelBadge).toHaveText("No models available");
-    await expect(notice).toContainText("Open Settings > Providers");
+    await expect(notice).toContainText("Settings > Models");
 
     await writeFile(
       join(agentDir, "auth.json"),
@@ -228,19 +343,20 @@ test("refreshing after a provider becomes available auto-enables that provider's
       await app.refreshRuntime(workspaceId);
     }, { workspaceId: selectedWorkspaceId });
 
-    await expect(modelBadge).toHaveText("Pick a model");
-    await expect(notice).toContainText("No default model set");
+    await expect(modelBadge).toHaveText("No models available");
+    await expect(notice).toContainText("Settings > Models");
 
     await modelBadge.click();
     const dropdown = window.locator(".new-thread__hint .model-selector__dropdown").first();
-    await expect(dropdown).toContainText("GPT-5");
-    await expect(dropdown).toContainText("GPT-4o");
+    await expect(dropdown).toContainText("No models available");
+    await expect(dropdown).not.toContainText("GPT-5");
+    await expect(dropdown).not.toContainText("GPT-4o");
   } finally {
     await harness.close();
   }
 });
 
-test("settings do not show stale enabled-model pills when no providers are connected", async () => {
+test("settings keep configured models visible when provider credentials are missing", async () => {
   test.setTimeout(60_000);
   const userDataDir = await makeUserDataDir();
   const agentDir = join(userDataDir, "agent");
@@ -262,20 +378,19 @@ test("settings do not show stale enabled-model pills when no providers are conne
     await openNewThread(window);
 
     await window.getByTestId("new-thread-composer").fill("check no provider settings");
-    await expect(window.getByTestId("model-onboarding-notice")).toContainText("Open Settings > Providers");
+    await expect(window.getByTestId("model-onboarding-notice")).toContainText("Settings > Models");
 
     await window.keyboard.press(desktopShortcut(","));
     await expect(window.getByTestId("settings-surface")).toBeVisible();
     await window.getByRole("button", { name: "Models", exact: true }).click();
     await expect(window.locator(".view-header__title")).toHaveText("Models");
 
-    const enabledModelsSection = window.locator(".settings-section", {
-      has: window.locator(".settings-section__title", { hasText: "Enabled models" }),
+    const configuredModelsSection = window.locator(".settings-section", {
+      has: window.locator(".settings-section__title", { hasText: "Configured models" }),
     });
-    await expect(enabledModelsSection).toContainText("No connected models available yet.");
-    await expect(enabledModelsSection).not.toContainText("openai/gpt-5");
-    await expect(enabledModelsSection).not.toContainText("openai/gpt-4o");
-    await expect(enabledModelsSection.locator(".settings-disclosure__summary")).toContainText("0");
+    await expect(configuredModelsSection).toContainText("openai/gpt-5");
+    await expect(configuredModelsSection).toContainText("openai/gpt-4o");
+    await expect(configuredModelsSection.locator(".settings-status--warning")).toHaveCount(2);
   } finally {
     await harness.close();
   }

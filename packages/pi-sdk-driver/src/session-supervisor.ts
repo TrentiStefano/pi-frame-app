@@ -1,7 +1,7 @@
 import { access, realpath, stat, unlink } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
-  ModelRegistry,
+  type ModelRuntime,
   SessionManager,
   type AgentSessionRuntime,
   type AgentSession,
@@ -13,8 +13,9 @@ import {
   type ExtensionUIContext,
   type ExtensionWidgetOptions,
   type SessionInfo,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { SessionCatalogSnapshot, WorkspaceCatalogSnapshot } from "@pi-gui/catalogs";
+import type { SessionCatalogSnapshot, WorkspaceCatalogSnapshot } from "@pi-frame/catalogs";
 import type {
   NavigateSessionTreeOptions,
   NavigateSessionTreeResult,
@@ -23,7 +24,7 @@ import type {
   SessionQueuedMessage,
   SessionTreeNodeSnapshot,
   SessionTreeSnapshot,
-} from "@pi-gui/session-driver/types";
+} from "@pi-frame/session-driver/types";
 import type {
   CreateSessionOptions,
   ForkSessionOptions,
@@ -40,8 +41,8 @@ import type {
   Unsubscribe,
   WorkspaceId,
   WorkspaceRef,
-} from "@pi-gui/session-driver";
-import type { RuntimeCommandRecord } from "@pi-gui/session-driver/runtime-types";
+} from "@pi-frame/session-driver";
+import type { RuntimeCommandRecord } from "@pi-frame/session-driver/runtime-types";
 import { isMissingFileError, JsonCatalogStore, type SessionFileCatalogStorage } from "./json-catalog-store.js";
 import {
   buildSessionSchemaInfo,
@@ -82,6 +83,7 @@ import {
   forcePersistSession,
   injectFileAttachmentPreamble,
   messageText,
+  normalizeToolUpdate,
   nowIso,
   previewFromSessionInfo,
   sessionKey,
@@ -100,17 +102,35 @@ import {
 } from "./npm-package-fallback.js";
 
 export interface PiSdkDriverOptions {
+  readonly agentDir?: string;
+  readonly modelRuntime?: ModelRuntime | Promise<ModelRuntime>;
   readonly catalogFilePath?: string;
-  /** Existing owner for catalog state. Takes precedence over catalogFilePath when provided. */
   readonly catalogStorage?: SessionFileCatalogStorage;
   readonly createAgentSessionRuntimeImpl?: (options?: CreateAgentSessionOptions) => Promise<AgentSessionRuntime>;
-  readonly modelRegistry?: ModelRegistry;
   readonly extensionFactories?: readonly ExtensionFactory[];
+  readonly sessionProfileFactory?: SessionProfileFactory;
   readonly generateThreadTitleOverride?: (
     workspace: WorkspaceRef,
     options: import("./thread-title-generator.js").GenerateThreadTitleOptions,
   ) => Promise<string | null | undefined>;
 }
+
+export interface SessionProfileContext {
+  readonly workspace: WorkspaceRef;
+  readonly sessionRef?: SessionRef;
+}
+
+export interface SessionToolProfile {
+  readonly noTools?: CreateAgentSessionOptions["noTools"];
+  readonly tools?: readonly string[];
+  readonly excludeTools?: readonly string[];
+  readonly customTools?: readonly ToolDefinition[];
+  readonly resourceLoaderOptions?: PiCreateAgentSessionOptions["resourceLoaderOptions"];
+}
+
+export type SessionProfileFactory = (
+  context: SessionProfileContext,
+) => SessionToolProfile | undefined | Promise<SessionToolProfile | undefined>;
 
 export interface SyncWorkspaceResult {
   readonly workspace: WorkspaceRef;
@@ -132,8 +152,12 @@ interface ManagedSessionRecord {
   runningRunId: string | undefined;
   queuedMessages: SessionQueuedMessage[];
   closed: boolean;
+  /** Admission barrier set synchronously when teardown is requested. */
+  closing: boolean;
   listeners: Set<SessionEventListener>;
   eventQueue: Promise<void>;
+  /** Serializes prompt submission with runtime replacement without blocking on the full agent turn. */
+  runtimeOperationQueue: Promise<void>;
   unsubscribeAgent: (() => void) | undefined;
   pendingHostUiRequests: Map<
     string,
@@ -149,6 +173,11 @@ interface ManagedSessionRecord {
   leasePath: string | undefined;
   /** mtime (epoch ms) of the JSONL last reconciled into the served transcript. */
   transcriptDiskMtimeMs: number | undefined;
+  /** Blocks new runtime admissions while lifecycle reconciliation snapshots state. */
+  runtimeAdmissionBlocked: boolean;
+  runtimeAdmissionGate: Promise<void> | undefined;
+  /** Monotonic fence for catalog snapshots superseded by reconciliation. */
+  persistenceGeneration: number;
 }
 
 interface RegisteredCommandAdapter {
@@ -179,9 +208,13 @@ interface SkillAdapter {
 export class SessionSupervisor {
   private readonly catalogs: SessionFileCatalogStorage;
   private readonly createAgentSessionRuntimeImpl: (options?: CreateAgentSessionOptions) => Promise<AgentSessionRuntime>;
-  private readonly modelRegistry: ModelRegistry | undefined;
+  private readonly agentDir: string | undefined;
+  private readonly modelRuntime: Promise<ModelRuntime> | undefined;
+  private readonly sessionProfileFactory: SessionProfileFactory | undefined;
   private readonly records = new Map<string, ManagedSessionRecord>();
   private readonly ensureRecordInFlight = new Map<string, Promise<ManagedSessionRecord>>();
+  /** Serializes persistence flushes with catalog reconciliation and deletion. */
+  private lifecycleQueue: Promise<void> = Promise.resolve();
   private readonly leaseIdentity: LeaseIdentity = currentLeaseIdentity();
   private readonly leaseTtlMs = DEFAULT_LEASE_TTL_MS;
   private readonly isPidAlive = defaultIsPidAlive;
@@ -197,12 +230,42 @@ export class SessionSupervisor {
       ((createOptions) =>
         createAgentSessionRuntimeWithNpmFallback({
           ...createOptions,
-          resourceLoaderOptions: {
-            ...(createOptions as PiCreateAgentSessionOptions | undefined)?.resourceLoaderOptions,
-            ...(options.extensionFactories ? { extensionFactories: [...options.extensionFactories] } : {}),
-          },
+          resourceLoaderOptions: mergeSessionResourceLoaderOptions(
+            options.extensionFactories,
+            (createOptions as PiCreateAgentSessionOptions | undefined)?.resourceLoaderOptions,
+          ),
         }));
-    this.modelRegistry = options.modelRegistry;
+    this.agentDir = options.agentDir;
+    this.modelRuntime = options.modelRuntime ? Promise.resolve(options.modelRuntime) : undefined;
+    this.sessionProfileFactory = options.sessionProfileFactory;
+  }
+
+  /** Drain runtime event tails and retry durable snapshots before shutdown. */
+  async flushPersistence(): Promise<void> {
+    await this.withLifecycleOperation(async () => {
+      const records = [...this.records.values()];
+    // Run the final snapshot retry in the same lifecycle queue as deletion.
+    // This closes the check-to-upsert window: a delete queued first marks the
+    // record closed and removes it before this callback runs; a flush queued
+    // first persists before deletion can begin.
+    await Promise.all(
+      records.map((record) =>
+        this.withRuntimeOperation(record, async () => {
+          await record.eventQueue;
+          // Runtime operations can enqueue their final mapped events as they
+          // settle. Drain the tail once more before retrying the snapshot.
+          await record.eventQueue;
+          if (this.records.get(sessionKey(record.ref)) !== record || record.closed) {
+            return;
+          }
+          // Unconditional retry is intentional, including live records whose
+          // prior boundary write failed.
+          await this.persistSnapshot(record);
+        }),
+      ),
+    );
+      await this.catalogs.flushPersistence();
+    });
   }
 
   listWorkspaces(): Promise<WorkspaceCatalogSnapshot> {
@@ -214,17 +277,25 @@ export class SessionSupervisor {
   }
 
   async registerWorkspace(path: string, displayName?: string): Promise<WorkspaceRef> {
+    return this.withLifecycleOperation(() => this.registerWorkspaceInternal(path, displayName));
+  }
+
+  private async registerWorkspaceInternal(path: string, displayName?: string): Promise<WorkspaceRef> {
     const workspace = await createCanonicalWorkspaceRef(path, displayName);
     await this.touchWorkspace(workspace);
     return workspace;
   }
 
   async syncWorkspace(path: string, displayName?: string): Promise<SyncWorkspaceResult> {
-    const workspace = await this.registerWorkspace(path, displayName);
+    return this.withLifecycleOperation(() => this.syncWorkspaceInternal(path, displayName));
+  }
+
+  private async syncWorkspaceInternal(path: string, displayName?: string): Promise<SyncWorkspaceResult> {
+    const workspace = await this.registerWorkspaceInternal(path, displayName);
     const infos = await SessionManager.list(path);
     const existingSessions = (await this.catalogs.sessions.listSessions(workspace.workspaceId)).sessions;
     const existingByKey = new Map(existingSessions.map((session) => [sessionKey(session.sessionRef), session]));
-    const nextEntries = infos.map((info) =>
+    let nextEntries = infos.map((info) =>
       this.sessionEntryFromInfo(
         workspace,
         info,
@@ -267,30 +338,74 @@ export class SessionSupervisor {
       )
     ).filter((session): session is NonNullable<typeof session> => Boolean(session));
     const preservedKeys = new Set(preservedEntries.map((entry) => sessionKey(entry.sessionRef)));
-    const mergedEntries = [...nextEntries, ...preservedEntries];
-    const nextSessionFiles = Object.fromEntries([
-      ...nextEntries.map((entry, index) => [sessionKey(entry.sessionRef), infos[index]?.path ?? ""]),
-      ...preservedEntries.map((entry) => [sessionKey(entry.sessionRef), entry.sessionFilePath ?? ""]),
-    ]);
 
-    await this.catalogs.replaceWorkspaceSessions(workspace.workspaceId, mergedEntries, nextSessionFiles);
-    for (const session of existingSessions) {
-      const key = sessionKey(session.sessionRef);
-      if (discoveredKeys.has(key) || preservedKeys.has(key)) {
-        continue;
+    // Close active records before replacing catalog entries. Include records
+    // missing from the initial catalog snapshot: a runtime can be active in
+    // memory while its catalog upsert is still queued or has failed.
+    const removedKeys = new Set(
+      existingSessions
+        .filter((session) => !discoveredKeys.has(sessionKey(session.sessionRef)) && !preservedKeys.has(sessionKey(session.sessionRef)))
+        .map((session) => sessionKey(session.sessionRef)),
+    );
+    for (const [key, record] of this.records) {
+      if (record.workspace.workspaceId === workspace.workspaceId && !discoveredKeys.has(key) && !preservedKeys.has(key)) {
+        removedKeys.add(key);
       }
-
-      await this.catalogs.sessions.deleteSession(session.sessionRef);
+    }
+    for (const key of removedKeys) {
       const record = this.records.get(key);
-      if (!record) {
-        continue;
+      if (record) {
+        await this.closeRemovedRecord(record);
       }
-
-      record.unsubscribeAgent?.();
-      record.unsubscribeAgent = undefined;
-      record.listeners.clear();
-      await this.disposeRecordRuntimeSafely(record);
-      this.records.delete(key);
+    }
+    // Freeze admission for retained records, then drain work admitted before the
+    // barrier. Runtime operations never acquire lifecycleQueue, so this cannot
+    // form a lifecycle/runtime deadlock. Rebuild from the drained live records
+    // immediately before replacement; the catalog write therefore cannot erase
+    // a mutation that was admitted before reconciliation.
+    const retainedRecords = [...this.records.values()].filter(
+      (record) => record.workspace.workspaceId === workspace.workspaceId && !removedKeys.has(sessionKey(record.ref)),
+    );
+    const admissionGates = retainedRecords.map((record) => this.blockRuntimeAdmission(record));
+    try {
+      await Promise.all(retainedRecords.map((record) => record.runtimeOperationQueue));
+      nextEntries = infos.map((info) =>
+        this.sessionEntryFromInfo(
+          workspace,
+          info,
+          this.records.get(sessionKey({ workspaceId: workspace.workspaceId, sessionId: info.id })),
+          existingByKey.get(sessionKey({ workspaceId: workspace.workspaceId, sessionId: info.id })),
+        ),
+      );
+      const refreshedEntries = nextEntries.concat(
+        preservedEntries.map((entry) => {
+          const record = this.records.get(sessionKey(entry.sessionRef));
+          return record && record.session && !record.closed ? {
+            ...entry,
+            title: record.title,
+            updatedAt: record.updatedAt,
+            status: record.status,
+            ...(record.preview !== undefined ? { previewSnippet: record.preview } : {}),
+            ...(record.archivedAt !== undefined ? { archivedAt: record.archivedAt } : {}),
+          } : entry;
+        }),
+      );
+      const refreshedSessionFiles = Object.fromEntries([
+        ...nextEntries.map((entry, index) => [sessionKey(entry.sessionRef), infos[index]?.path ?? ""]),
+        ...preservedEntries.map((entry) => [sessionKey(entry.sessionRef), entry.sessionFilePath ?? ""]),
+      ]);
+      // Fence terminal snapshots captured before reconciliation. This happens
+      // before replacement yields to a blocked writer or listener callback.
+      for (const record of retainedRecords) {
+        record.persistenceGeneration += 1;
+      }
+      await this.catalogs.replaceWorkspaceSessions(workspace.workspaceId, refreshedEntries, refreshedSessionFiles);
+    } finally {
+      for (const [record, gate] of admissionGates) {
+        record.runtimeAdmissionBlocked = false;
+        gate();
+        record.runtimeAdmissionGate = undefined;
+      }
     }
 
     return {
@@ -306,11 +421,13 @@ export class SessionSupervisor {
    * workspace is no longer tracked.
    */
   async reconcileWorkspace(workspaceId: WorkspaceId): Promise<SyncWorkspaceResult | undefined> {
-    const workspace = await this.catalogs.workspaces.getWorkspace(workspaceId);
-    if (!workspace) {
-      return undefined;
-    }
-    return this.syncWorkspace(workspace.path);
+    return this.withLifecycleOperation(async () => {
+      const workspace = await this.catalogs.workspaces.getWorkspace(workspaceId);
+      if (!workspace) {
+        return undefined;
+      }
+      return this.syncWorkspaceInternal(workspace.path);
+    });
   }
 
   /**
@@ -323,6 +440,10 @@ export class SessionSupervisor {
   }
 
   async renameWorkspace(workspaceId: WorkspaceId, displayName: string): Promise<void> {
+    return this.withLifecycleOperation(() => this.renameWorkspaceInternal(workspaceId, displayName));
+  }
+
+  private async renameWorkspaceInternal(workspaceId: WorkspaceId, displayName: string): Promise<void> {
     const existing = await this.catalogs.workspaces.getWorkspace(workspaceId);
     if (!existing) {
       throw new Error(`Unknown workspace: ${workspaceId}`);
@@ -339,22 +460,27 @@ export class SessionSupervisor {
   }
 
   async removeWorkspace(workspaceId: WorkspaceId): Promise<void> {
-    const sessions = (await this.catalogs.sessions.listSessions(workspaceId)).sessions;
-    await this.catalogs.workspaces.deleteWorkspace(workspaceId);
-
-    for (const session of sessions) {
-      const key = sessionKey(session.sessionRef);
-      const record = this.records.get(key);
-      if (!record) {
-        continue;
+    await this.withLifecycleOperation(async () => {
+      const sessions = (await this.catalogs.sessions.listSessions(workspaceId)).sessions;
+      const keys = new Set(sessions.map((session) => sessionKey(session.sessionRef)));
+      // The catalog snapshot can miss a record whose upsert is queued or
+      // failed. Teardown every active record owned by the workspace as well.
+      for (const [key, record] of this.records) {
+        if (record.workspace.workspaceId === workspaceId) {
+          keys.add(key);
+        }
       }
-
-      record.unsubscribeAgent?.();
-      record.unsubscribeAgent = undefined;
-      record.listeners.clear();
-      await this.disposeRecordRuntimeSafely(record);
-      this.records.delete(key);
-    }
+      for (const key of keys) {
+        const record = this.records.get(key);
+        if (record) {
+          await this.closeRemovedRecord(record);
+        }
+      }
+      // Delete only after every active record has stopped callbacks and drained
+      // its runtime operation and event FIFOs, so no queued terminal persistence
+      // can recreate catalog state.
+      await this.catalogs.workspaces.deleteWorkspace(workspaceId);
+    });
   }
 
   async getTranscript(sessionRef: SessionRef): Promise<SessionTranscriptItem[]> {
@@ -450,15 +576,17 @@ export class SessionSupervisor {
   }
 
   async createSession(workspace: WorkspaceRef, options?: CreateSessionOptions): Promise<SessionSnapshot> {
-    await this.touchWorkspace(workspace);
+    return this.withLifecycleOperation(() => this.createSessionInternal(workspace, options));
+  }
 
+  private async createSessionInternal(workspace: WorkspaceRef, options?: CreateSessionOptions): Promise<SessionSnapshot> {
+    await this.touchWorkspace(workspace);
     const initialModel = options?.initialModel
-      ? this.resolveModel(options.initialModel.provider, options.initialModel.modelId)
+      ? await this.resolveModel(options.initialModel.provider, options.initialModel.modelId)
       : undefined;
     const createOptions: CreateAgentSessionOptions = {
       cwd: workspace.path,
       sessionManager: SessionManager.create(workspace.path),
-      ...(this.modelRegistry ? { modelRegistry: this.modelRegistry } : {}),
     };
     if (initialModel) {
       createOptions.model = initialModel;
@@ -467,7 +595,7 @@ export class SessionSupervisor {
       createOptions.thinkingLevel = options.initialThinkingLevel as NonNullable<CreateAgentSessionOptions["thinkingLevel"]>;
     }
 
-    const runtime = await this.createAgentSessionRuntimeImpl(createOptions);
+    const runtime = await this.createRuntimeForSession(workspace, createOptions);
     const session = runtime.session;
 
     const record = this.createRecord(workspace, runtime, options?.title ?? deriveWorkspaceTitle(workspace));
@@ -477,11 +605,15 @@ export class SessionSupervisor {
     const sessionFile = record.sessionFile ?? session.sessionManager.getSessionFile();
     if (sessionFile) {
       record.sessionFile = sessionFile;
-      await this.catalogs.setSessionFile(record.ref, sessionFile);
     }
 
     this.records.set(sessionKey(record.ref), record);
-    await this.bindSessionRuntime(record);
+    try {
+      await this.bindSessionRuntime(record);
+    } catch (error) {
+      await this.cleanupFailedBinding(record, runtime, undefined, sessionFile);
+      throw error;
+    }
     await this.persistSnapshot(record);
     const snapshot = buildSnapshot(record);
     await this.emit(record, {
@@ -498,7 +630,11 @@ export class SessionSupervisor {
   }
 
   async forkSession(sourceRef: SessionRef, options: ForkSessionOptions): Promise<ForkSessionResult> {
-    const { sourceRecord, sourceFile, branch, selectedEntry } = await this.resolveForkSource(sourceRef, options);
+    return this.withLifecycleOperation(() => this.forkSessionInternal(sourceRef, options));
+  }
+
+  private async forkSessionInternal(sourceRef: SessionRef, options: ForkSessionOptions): Promise<ForkSessionResult> {
+    const { sourceRecord, sourceFile, branch, selectedEntry } = await this.resolveForkSource(sourceRef, options, true);
 
     const position = options.position ?? "before";
     let targetLeafId: string | undefined;
@@ -540,17 +676,22 @@ export class SessionSupervisor {
     const sameWorkspace = resolve(targetWorkspace.path) === resolve(sourceRecord.workspace.path);
 
     // Build a branched SessionManager containing only the history up to the fork point.
+    // This path is owned by this fork attempt until its runtime is bound; cleanup
+    // must never remove a source/reopen/rebind file.
+    let generatedSessionFile: string | undefined;
     let branchedManager: SessionManager;
     if (!targetLeafId) {
       // Forking before the first user message: start a fresh empty session in the target.
       branchedManager = SessionManager.create(targetWorkspace.path);
       branchedManager.newSession({ parentSession: sourceFile });
+      generatedSessionFile = branchedManager.getSessionFile();
     } else if (sameWorkspace) {
       const opened = SessionManager.open(sourceFile);
       const forkedPath = opened.createBranchedSession(targetLeafId);
       if (!forkedPath) {
         throw new Error(`Failed to create forked session from ${sessionKey(sourceRef)}.`);
       }
+      generatedSessionFile = forkedPath;
       branchedManager = opened;
     } else {
       const forked = SessionManager.forkFrom(sourceFile, targetWorkspace.path);
@@ -566,18 +707,18 @@ export class SessionSupervisor {
         throw error;
       }
       await removeIntermediateForkSession(fullForkPath, forkedPath);
+      generatedSessionFile = forkedPath;
       branchedManager = forked;
     }
 
     const createOptions: CreateAgentSessionOptions = {
       cwd: targetWorkspace.path,
       sessionManager: branchedManager,
-      ...(this.modelRegistry ? { modelRegistry: this.modelRegistry } : {}),
     };
     const forkConfig = deriveSessionConfig(branchedManager);
     if (forkConfig?.provider && forkConfig?.modelId) {
       try {
-        createOptions.model = this.resolveModel(forkConfig.provider, forkConfig.modelId);
+        createOptions.model = await this.resolveModel(forkConfig.provider, forkConfig.modelId);
       } catch {
         // Forked model is no longer available; fall back to the runtime default.
       }
@@ -588,21 +729,44 @@ export class SessionSupervisor {
       >;
     }
 
-    const runtime = await this.createAgentSessionRuntimeImpl(createOptions);
-    const session = runtime.session;
-
-    const title = options.title ?? sourceRecord.title;
-    const record = this.createRecord(targetWorkspace, runtime, title);
-    forcePersistSession(session.sessionManager);
-    record.config = deriveSessionConfig(session.sessionManager);
-    const sessionFile = record.sessionFile ?? session.sessionManager.getSessionFile();
-    if (sessionFile) {
-      record.sessionFile = sessionFile;
-      await this.catalogs.setSessionFile(record.ref, sessionFile);
+    let runtime: AgentSessionRuntime;
+    try {
+      runtime = await this.createRuntimeForSession(targetWorkspace, createOptions);
+    } catch (error) {
+      await removeGeneratedForkSession(generatedSessionFile);
+      throw error;
     }
+    const session = runtime.session;
+    let record: ManagedSessionRecord | undefined;
+    let sessionFile: string | undefined;
+    try {
+      const title = options.title ?? sourceRecord.title;
+      record = this.createRecord(targetWorkspace, runtime, title);
+      forcePersistSession(session.sessionManager);
+      record.config = deriveSessionConfig(session.sessionManager);
+      sessionFile = record.sessionFile ?? session.sessionManager.getSessionFile();
+      if (sessionFile) {
+        record.sessionFile = sessionFile;
+      }
 
-    this.records.set(sessionKey(record.ref), record);
-    await this.bindSessionRuntime(record);
+      this.records.set(sessionKey(record.ref), record);
+      await this.bindSessionRuntime(record);
+    } catch (error) {
+      if (record) {
+        await this.cleanupFailedBinding(record, runtime, undefined, generatedSessionFile ?? sessionFile);
+      } else {
+        await removeGeneratedForkSession(generatedSessionFile);
+        try {
+          await runtime.dispose();
+        } catch (disposeError) {
+          console.warn(`[pi-sdk-driver] failed to dispose failed fork runtime:`, disposeError);
+        }
+      }
+      throw error;
+    }
+    if (!record) {
+      throw new Error("Fork runtime bound without a session record.");
+    }
     await this.persistSnapshot(record);
     const snapshot = buildSnapshot(record);
     await this.emit(record, {
@@ -617,13 +781,16 @@ export class SessionSupervisor {
   private async resolveForkSource(
     sourceRef: SessionRef,
     options: ForkSessionOptions,
+    alreadyInLifecycle = false,
   ): Promise<{
     readonly sourceRecord: ManagedSessionRecord;
     readonly sourceFile: string;
     readonly branch: readonly SessionBranchEntry[];
     readonly selectedEntry: SessionMessageBranchEntry;
   }> {
-    const sourceRecord = await this.ensureRecord(sourceRef);
+    const sourceRecord = alreadyInLifecycle
+      ? await this.ensureRecordInLifecycle(sourceRef)
+      : await this.ensureRecord(sourceRef);
     const sourceSession = this.requireSession(sourceRecord);
     const sourceManager = sourceSession.sessionManager;
     const sourceFile = sourceRecord.sessionFile ?? sourceManager.getSessionFile();
@@ -667,212 +834,449 @@ export class SessionSupervisor {
     await this.updateArchivedState(sessionRef, undefined);
   }
 
+  async deleteSession(sessionRef: SessionRef): Promise<void> {
+    return this.withLifecycleOperation(() => this.deleteSessionInternal(sessionRef));
+  }
+
+  private async deleteSessionInternal(sessionRef: SessionRef): Promise<void> {
+    const key = sessionKey(sessionRef);
+    const record = this.records.get(key);
+    const performDelete = async (activeRecord: ManagedSessionRecord | undefined): Promise<void> => {
+      const catalogEntry = await this.catalogs.sessions.getSession(sessionRef);
+      if (!activeRecord && !catalogEntry) {
+        throw new Error(`Session ${key} is not in the catalog.`);
+      }
+
+      const sessionFile =
+        activeRecord?.sessionFile ?? catalogEntry?.sessionFilePath ?? (await this.catalogs.getSessionFile(sessionRef));
+      if (sessionFile && !activeRecord) {
+        await this.assertSessionNotForeignLeased(sessionFile);
+      }
+
+      if (activeRecord) {
+        activeRecord.closed = true;
+        activeRecord.runningRunId = undefined;
+        activeRecord.status = "idle";
+        this.clearExtensionUiState(activeRecord);
+        this.cancelPendingHostUiRequests(activeRecord);
+        if (activeRecord.session) {
+          try {
+            await activeRecord.session.abort();
+          } catch {
+            // Best effort; disposal below still releases the runtime and lease.
+          }
+        }
+        activeRecord.unsubscribeAgent?.();
+        activeRecord.unsubscribeAgent = undefined;
+        activeRecord.listeners.clear();
+        await this.disposeRecordRuntime(activeRecord);
+      }
+
+      if (sessionFile) {
+        try {
+          await unlink(sessionFile);
+        } catch (error) {
+          if (!isMissingFileError(error)) {
+            throw error;
+          }
+        }
+        try {
+          await removeLeaseFile(sessionLeasePath(sessionFile));
+        } catch {
+          // The session is deleted even if a stale advisory lease was already gone.
+        }
+      }
+
+      await this.catalogs.sessions.deleteSession(sessionRef);
+      if (activeRecord && this.records.get(key) === activeRecord) {
+        this.records.delete(key);
+      }
+    };
+
+    if (!record) {
+      await performDelete(undefined);
+      return;
+    }
+
+    await this.withRuntimeOperation(record, async () => {
+      if (this.records.get(key) !== record) {
+        return;
+      }
+      await performDelete(record);
+    });
+  }
+
   async sendUserMessage(sessionRef: SessionRef, input: SessionMessageInput): Promise<void> {
     const record = await this.ensureRecord(sessionRef);
-    const session = this.requireSession(record);
-    const isExtensionCommand = this.isExtensionCommand(session, input.text);
-    if (session.isStreaming && !isExtensionCommand && !input.deliverAs) {
-      throw new Error("Session is already streaming. Specify deliverAs ('steer' or 'followUp') to queue the message.");
+    if (!this.isCurrentRecord(record) || !record.session) {
+      throw new Error(`Session ${sessionKey(sessionRef)} is not active.`);
     }
-
-    const isQueuedMessage = session.isStreaming && !isExtensionCommand && Boolean(input.deliverAs);
-    const runId = isQueuedMessage || isExtensionCommand ? undefined : crypto.randomUUID();
-    record.runningRunId = runId ?? record.runningRunId;
-    record.status = isQueuedMessage || isExtensionCommand ? record.status : "running";
-    record.updatedAt = nowIso();
-    record.config = deriveSessionConfig(session.sessionManager);
-    record.preview = truncate(input.text);
-    if (isQueuedMessage) {
-      record.queuedMessages = [
-        ...record.queuedMessages,
-        queuedMessageFromInput(input, record.updatedAt),
-      ];
-    }
-    await this.persistSnapshot(record);
-    await this.emit(record, sessionUpdatedEvent(record));
-
+    let attempt: {
+      readonly session: AgentSession;
+      readonly isQueuedMessage: boolean;
+      readonly isExtensionCommand: boolean;
+      readonly runId?: string;
+      readonly queuedMessageId?: string;
+      completion?: Promise<void>;
+    } | undefined;
     try {
-      const images = input.attachments?.flatMap((attachment: NonNullable<SessionMessageInput["attachments"]>[number]) =>
-        attachment.kind === "image"
-          ? [{
-              type: "image" as const,
-              data: attachment.data,
-              mimeType: attachment.mimeType,
-            }]
-          : [],
-      );
-      const promptText = injectFileAttachmentPreamble(input.text, input.attachments);
-      if (isQueuedMessage) {
-        // The queued-vs-prompt decision was made before the persistSnapshot/emit
-        // awaits above; the agent may have finished its turn in that window. A
-        // steer/follow-up now would attach to nothing and be silently dropped,
-        // so re-check the live streaming state and surface a retryable error
-        // instead. The catch below rolls back the optimistic queued entry.
-        if (!session.isStreaming) {
-          throw new Error(
-            "Session finished streaming before the queued message could be delivered. Retry to send it as a new turn.",
-          );
+      await this.withRuntimeOperation(record, async () => {
+        // Admission is checked again inside the FIFO. closeSession sets closing
+        // synchronously, while this send may have waited behind another turn.
+        if (!this.isCurrentRecord(record) || record.closed || record.closing || !record.session) {
+          throw new Error(`Session ${sessionKey(sessionRef)} is not active.`);
         }
-        await this.queuePrompt(session, promptText, input.deliverAs!, images);
-      } else {
-        await session.prompt(promptText, {
-          ...(images && images.length > 0 ? { images } : {}),
-          source: "interactive",
+        const session = this.requireSession(record);
+        const isExtensionCommand = this.isExtensionCommand(session, input.text);
+        if (session.isStreaming && !isExtensionCommand && !input.deliverAs) {
+          throw new Error("Session is already streaming. Specify deliverAs ('steer' or 'followUp') to queue the message.");
+        }
+
+        const isQueuedMessage = session.isStreaming && !isExtensionCommand && Boolean(input.deliverAs);
+        const runId = isQueuedMessage || isExtensionCommand ? undefined : crypto.randomUUID();
+        const queuedMessage = isQueuedMessage ? queuedMessageFromInput(input, nowIso()) : undefined;
+        attempt = {
+          session,
+          isQueuedMessage,
+          isExtensionCommand,
+          ...(runId ? { runId } : {}),
+          ...(queuedMessage ? { queuedMessageId: queuedMessage.id } : {}),
+        };
+        record.runningRunId = runId ?? record.runningRunId;
+        record.status = isQueuedMessage || isExtensionCommand ? record.status : "running";
+        record.updatedAt = queuedMessage?.createdAt ?? nowIso();
+        record.config = deriveSessionConfig(session.sessionManager);
+        record.preview = truncate(input.text);
+        if (queuedMessage) {
+          record.queuedMessages = [...record.queuedMessages, queuedMessage];
+        }
+        await this.persistSnapshot(record);
+        if (!this.isCurrentSessionRecord(record, session)) return;
+        await this.emit(record, sessionUpdatedEvent(record));
+        if (!this.isCurrentSessionRecord(record, session)) return;
+
+        const images = input.attachments?.flatMap((attachment: NonNullable<SessionMessageInput["attachments"]>[number]) =>
+          attachment.kind === "image"
+            ? [{
+                type: "image" as const,
+                data: attachment.data,
+                mimeType: attachment.mimeType,
+              }]
+            : [],
+        );
+        const promptText = injectFileAttachmentPreamble(input.text, input.attachments);
+        if (isQueuedMessage) {
+          // The queued-vs-prompt decision was made before the persistSnapshot/emit
+          // awaits above; the agent may have finished its turn in that window. A
+          // steer/follow-up now would attach to nothing and be silently dropped,
+          // so re-check the live streaming state and surface a retryable error.
+          if (!this.isCurrentSessionRecord(record, session) || !session.isStreaming) {
+            if (!this.isCurrentSessionRecord(record, session)) return;
+            throw new Error(
+              "Session finished streaming before the queued message could be delivered. Retry to send it as a new turn.",
+            );
+          }
+          attempt.completion = this.queuePrompt(session, promptText, input.deliverAs!, images);
+        } else {
+          if (!this.isCurrentSessionRecord(record, session)) return;
+          attempt.completion = session.prompt(promptText, {
+            ...(images && images.length > 0 ? { images } : {}),
+            source: "interactive",
+          });
+        }
+      });
+
+      await attempt!.completion;
+      if (attempt && this.isCurrentSessionRecord(record, attempt.session) && attempt.isExtensionCommand) {
+        await this.withRuntimeOperation(record, async () => {
+          if (this.isCurrentSessionRecord(record, attempt!.session)) {
+            await this.syncRecordAfterSessionMutation(record, { emitUpdate: true });
+          }
         });
       }
-
-      if (isExtensionCommand) {
-        await this.syncRecordAfterSessionMutation(record, { emitUpdate: true });
-      }
     } catch (error) {
-      if (isQueuedMessage) {
-        record.queuedMessages = record.queuedMessages.slice(0, -1);
-      }
-      if (!isQueuedMessage) {
-        record.runningRunId = undefined;
-      }
-      record.status = isQueuedMessage ? "running" : isExtensionCommand ? "idle" : "failed";
-      record.updatedAt = nowIso();
-      record.preview = error instanceof Error ? error.message : String(error);
-      await this.persistSnapshot(record);
-      await this.emit(record, {
-        type: "runFailed",
-        sessionRef: record.ref,
-        timestamp: nowIso(),
-        error: toSessionErrorInfo(error, "SEND_FAILED"),
-        ...(runId ? { runId } : {}),
+      await this.withRuntimeOperation(record, async () => {
+        if (!attempt || !this.isCurrentSessionRecord(record, attempt.session)) {
+          return;
+        }
+        if (attempt.queuedMessageId) {
+          record.queuedMessages = record.queuedMessages.filter((message) => message.id !== attempt!.queuedMessageId);
+        }
+        if (!attempt.isQueuedMessage) {
+          record.runningRunId = undefined;
+        }
+        record.status = attempt.isQueuedMessage ? "running" : attempt.isExtensionCommand ? "idle" : "failed";
+        record.updatedAt = nowIso();
+        record.preview = error instanceof Error ? error.message : String(error);
+        await this.persistSnapshot(record);
+        if (!this.isCurrentSessionRecord(record, attempt.session)) return;
+        await this.emit(record, {
+          type: "runFailed",
+          sessionRef: record.ref,
+          timestamp: nowIso(),
+          error: toSessionErrorInfo(error, "SEND_FAILED"),
+          ...(attempt.runId ? { runId: attempt.runId } : {}),
+        });
+        if (!this.isCurrentSessionRecord(record, attempt.session)) return;
+        await this.emit(record, sessionUpdatedEvent(record));
       });
-      await this.emit(record, sessionUpdatedEvent(record));
       throw error;
     }
   }
 
   async replaceQueuedMessages(sessionRef: SessionRef, messages: readonly SessionQueuedMessage[]): Promise<void> {
     const record = await this.ensureRecord(sessionRef);
-    const session = this.requireSession(record);
-    session.clearQueue();
-
-    record.queuedMessages = messages.map((message) => cloneQueuedMessage(message));
-    for (const message of record.queuedMessages) {
-      const images = message.attachments?.flatMap((attachment: NonNullable<SessionQueuedMessage["attachments"]>[number]) =>
-        attachment.kind === "image"
-          ? [{
-              type: "image" as const,
-              data: attachment.data,
-              mimeType: attachment.mimeType,
-            }]
-          : [],
-      );
-      const promptText = injectFileAttachmentPreamble(message.text, message.attachments);
-      await this.queuePrompt(session, promptText, message.mode, images);
-    }
-
-    record.updatedAt = nowIso();
-    await this.persistSnapshot(record);
-    await this.emit(record, sessionUpdatedEvent(record));
+    await this.withRuntimeOperation(record, async () => {
+      if (!this.isCurrentRecord(record)) return;
+      const session = this.requireSession(record);
+      session.clearQueue();
+      record.queuedMessages = messages.map((message) => cloneQueuedMessage(message));
+      for (const message of record.queuedMessages) {
+        const images = message.attachments?.flatMap((attachment: NonNullable<SessionQueuedMessage["attachments"]>[number]) =>
+          attachment.kind === "image" ? [{ type: "image" as const, data: attachment.data, mimeType: attachment.mimeType }] : [],
+        );
+        await this.queuePrompt(session, injectFileAttachmentPreamble(message.text, message.attachments), message.mode, images);
+        if (!this.isCurrentRecord(record)) return;
+      }
+      if (!this.isCurrentRecord(record)) return;
+      record.updatedAt = nowIso();
+      await this.persistSnapshot(record);
+      if (!this.isCurrentRecord(record)) return;
+      await this.emit(record, sessionUpdatedEvent(record));
+    });
   }
 
   async cancelCurrentRun(sessionRef: SessionRef): Promise<void> {
     const record = this.records.get(sessionKey(sessionRef));
-    if (!record?.session) {
-      return;
-    }
-
-    try {
-      await record.session.abort();
-    } catch (error) {
-      // Abort is best-effort. Even if the runtime reports a failure we still
-      // reset local run state below so the UI does not stay stuck on "running".
-      console.warn(`[pi-sdk-driver] abort failed for ${sessionKey(record.ref)}:`, error);
-    }
-
-    // Aborting ends the current turn, so any steer/follow-up messages queued
-    // against it can never be delivered. Clear both the SDK queue and our
-    // mirror so the composer stops showing orphaned pending messages — matching
-    // the SDK's own "clear the queue when the user aborts" convention.
-    record.session?.clearQueue();
-    record.queuedMessages = [];
-    record.runningRunId = undefined;
-    record.status = "idle";
-    await this.persistSnapshot(record);
-    await this.emit(record, sessionUpdatedEvent(record));
+    if (!record?.session) return;
+    await this.withRuntimeOperation(record, async () => {
+      if (!this.isCurrentRecord(record) || !record.session) return;
+      try {
+        await record.session.abort();
+      } catch (error) {
+        console.warn(`[pi-sdk-driver] abort failed for ${sessionKey(record.ref)}:`, error);
+      }
+      if (!this.isCurrentRecord(record) || !record.session) return;
+      record.session.clearQueue();
+      record.queuedMessages = [];
+      record.runningRunId = undefined;
+      record.status = "idle";
+      await this.persistSnapshot(record);
+      if (!this.isCurrentRecord(record)) return;
+      await this.emit(record, sessionUpdatedEvent(record));
+    });
   }
 
   async setSessionModel(sessionRef: SessionRef, selection: SessionModelSelection): Promise<void> {
     const record = await this.ensureRecord(sessionRef);
-    const session = record.session;
-    if (!session) {
-      throw new Error(`Session ${sessionKey(record.ref)} is not active.`);
-    }
-
-    const model = this.resolveModel(selection.provider, selection.modelId);
-    const auth = await session.modelRegistry.getApiKeyAndHeaders(model);
-    if (!auth.ok) {
-      throw new Error(auth.error);
-    }
-
-    const previousModel = session.model;
-    const previousThinkingLevel = session.supportsThinking()
-      ? session.thinkingLevel
-      : (session.settingsManager.getDefaultThinkingLevel() ?? DEFAULT_SESSION_THINKING_LEVEL);
-
-    session.agent.state.model = model;
-    session.sessionManager.appendModelChange(model.provider, model.id);
-    this.applySessionThinkingLevel(session, previousThinkingLevel);
-    await this.emitModelSelection(session, model, previousModel);
-    forcePersistSession(session.sessionManager);
-    record.config = deriveSessionConfig(session.sessionManager);
-    await this.persistSnapshot(record);
-    await this.emit(record, sessionUpdatedEvent(record));
+    await this.withRuntimeOperation(record, async () => {
+      if (!this.isCurrentRecord(record)) return;
+      const session = this.requireSession(record);
+      const model = await this.resolveModel(selection.provider, selection.modelId);
+      const auth = await session.modelRuntime.getAuth(model);
+      if (!this.isCurrentRecord(record)) return;
+      if (!auth) throw new Error(`Authentication is not configured for ${selection.provider}.`);
+      const previousModel = session.model;
+      const previousThinkingLevel = session.supportsThinking() ? session.thinkingLevel : (session.settingsManager.getDefaultThinkingLevel() ?? DEFAULT_SESSION_THINKING_LEVEL);
+      session.agent.state.model = model;
+      session.sessionManager.appendModelChange(model.provider, model.id);
+      this.applySessionThinkingLevel(session, previousThinkingLevel);
+      await this.emitModelSelection(session, model, previousModel);
+      if (!this.isCurrentRecord(record)) return;
+      forcePersistSession(session.sessionManager);
+      record.config = deriveSessionConfig(session.sessionManager);
+      await this.persistSnapshot(record);
+      if (!this.isCurrentRecord(record)) return;
+      await this.emit(record, sessionUpdatedEvent(record));
+    });
   }
 
   async setSessionThinkingLevel(sessionRef: SessionRef, thinkingLevel: string): Promise<void> {
     const record = await this.ensureRecord(sessionRef);
-    const session = this.requireSession(record);
-    this.applySessionThinkingLevel(session, thinkingLevel);
-    forcePersistSession(session.sessionManager);
-    record.config = deriveSessionConfig(session.sessionManager);
-    await this.persistSnapshot(record);
-    await this.emit(record, sessionUpdatedEvent(record));
+    await this.withRuntimeOperation(record, async () => {
+      if (!this.isCurrentRecord(record)) return;
+      const session = this.requireSession(record);
+      this.applySessionThinkingLevel(session, thinkingLevel);
+      forcePersistSession(session.sessionManager);
+      record.config = deriveSessionConfig(session.sessionManager);
+      await this.persistSnapshot(record);
+      if (!this.isCurrentRecord(record)) return;
+      await this.emit(record, sessionUpdatedEvent(record));
+    });
   }
 
   async renameSession(sessionRef: SessionRef, title: string): Promise<void> {
     const record = await this.ensureRecord(sessionRef);
-    const nextTitle = title.trim();
-    if (!nextTitle) {
-      throw new Error("Session title cannot be empty.");
-    }
-
-    const sessionManager = this.getWritableSessionManager(record);
-    sessionManager.appendSessionInfo(nextTitle);
-    forcePersistSession(sessionManager);
-    record.title = nextTitle;
-    await this.persistSnapshot(record);
-    await this.emit(record, sessionUpdatedEvent(record));
+    await this.withRuntimeOperation(record, async () => {
+      if (!this.isCurrentRecord(record)) return;
+      const nextTitle = title.trim();
+      if (!nextTitle) throw new Error("Session title cannot be empty.");
+      const sessionManager = this.getWritableSessionManager(record);
+      sessionManager.appendSessionInfo(nextTitle);
+      forcePersistSession(sessionManager);
+      record.title = nextTitle;
+      await this.persistSnapshot(record);
+      if (!this.isCurrentRecord(record)) return;
+      await this.emit(record, sessionUpdatedEvent(record));
+    });
   }
 
   async compactSession(sessionRef: SessionRef, customInstructions?: string): Promise<void> {
     const record = await this.ensureRecord(sessionRef);
-    if (!record.session) {
-      throw new Error(`Session ${sessionKey(sessionRef)} is not active.`);
-    }
-
-    await record.session.compact(customInstructions);
-    record.runningRunId = undefined;
-    record.status = "idle";
-    record.config = deriveSessionConfig(record.session.sessionManager);
-    record.preview = extractPreview(record.session.messages) ?? record.preview;
-    await this.persistSnapshot(record);
-    await this.emit(record, sessionUpdatedEvent(record));
+    await this.withRuntimeOperation(record, async () => {
+      if (!this.isCurrentRecord(record) || !record.session) {
+        if (!record.closed) throw new Error(`Session ${sessionKey(sessionRef)} is not active.`);
+        return;
+      }
+      const session = record.session;
+      await session.compact(customInstructions);
+      if (!this.isCurrentRecord(record) || record.session !== session) return;
+      record.runningRunId = undefined;
+      record.status = "idle";
+      record.config = deriveSessionConfig(session.sessionManager);
+      record.preview = extractPreview(session.messages) ?? record.preview;
+      await this.persistSnapshot(record);
+      if (!this.isCurrentRecord(record)) return;
+      await this.emit(record, sessionUpdatedEvent(record));
+    });
   }
 
   async reloadSession(sessionRef: SessionRef): Promise<void> {
     const record = await this.ensureRecord(sessionRef);
-    const session = this.requireSession(record);
+    await this.withRuntimeOperation(record, async () => {
+      if (!this.isCurrentRecord(record)) return;
+      const session = this.requireSession(record);
+      this.resetExtensionUi(record);
+      await session.reload();
+      if (!this.isCurrentRecord(record) || record.session !== session) return;
+      await this.syncRecordAfterSessionMutation(record, { emitUpdate: true });
+    });
+  }
 
-    this.resetExtensionUi(record);
-    await session.reload();
-    await this.syncRecordAfterSessionMutation(record, { emitUpdate: true });
+  /**
+   * Recreate the AgentSession runtime for the current JSONL file.
+   *
+   * `AgentSession.reload()` refreshes settings, resources, and tools in place,
+   * but intentionally keeps the current model object. That is insufficient
+   * when models.json changes a provider's endpoint or model definition. Build
+   * a fresh runtime through the supervisor factory so shared auth/model state is
+   * consulted again and the session profile is retained.
+   * The replacement is fully created and bound before the old runtime is
+   * disposed, because AgentSessionRuntime.switchSession() tears down first.
+   */
+  async rebindSession(sessionRef: SessionRef): Promise<void> {
+    return this.withLifecycleOperation(() => this.rebindSessionInternal(sessionRef));
+  }
+
+  private async rebindSessionInternal(sessionRef: SessionRef): Promise<void> {
+    const key = sessionKey(sessionRef);
+    const record = this.records.get(key);
+    if (!record || record.closed || !record.session || !record.runtime) {
+      return;
+    }
+
+    await this.withRuntimeOperation(record, async () => {
+      if (record.closed || this.records.get(key) !== record || !record.session || !record.runtime) {
+        return;
+      }
+
+      const session = this.requireSession(record);
+      const previousRuntime = this.requireRuntime(record);
+      const sessionFile = record.sessionFile ?? session.sessionFile ?? session.sessionManager.getSessionFile();
+      if (!sessionFile) {
+        // In-memory sessions have no persisted model selection to resolve. Keep
+        // the existing reload semantics for this rare path.
+        this.resetExtensionUi(record);
+        await session.reload();
+        await this.syncRecordAfterSessionMutation(record, { emitUpdate: true });
+        return;
+      }
+
+      if (session.isStreaming) {
+        try {
+          await session.abort();
+        } catch (error) {
+          console.warn(`[pi-sdk-driver] abort before rebind failed for ${sessionKey(sessionRef)}:`, error);
+        }
+      }
+
+      // Build the complete replacement before invalidating the current runtime.
+      // AgentSessionRuntime.switchSession() tears down first, so a provider or
+      // extension creation failure would otherwise leave this record pointing at
+      // a disposed session.
+      const replacementRuntime = await this.createRuntimeForSession(
+        record.workspace,
+        await this.createPersistedSessionOptions(record.workspace, sessionFile, record.workspace.path),
+        record.ref,
+      );
+
+      if (
+        record.closed ||
+        this.records.get(key) !== record ||
+        record.session !== session ||
+        record.runtime !== previousRuntime
+      ) {
+        try {
+          await replacementRuntime.dispose();
+        } catch (error) {
+          console.warn(`[pi-sdk-driver] failed to dispose stale replacement runtime for ${key}:`, error);
+        }
+        return;
+      }
+
+      const previousRef = { ...record.ref };
+      const previousKey = sessionKey(previousRef);
+      const previousSessionFile = record.sessionFile;
+      const previousSessionCommands = record.sessionCommands;
+      const previousTranscriptDiskMtimeMs = record.transcriptDiskMtimeMs;
+      const previousExtensionUiState: ExtensionUiState = {
+        statuses: new Map(record.extensionUiState.statuses),
+        widgets: new Map(record.extensionUiState.widgets),
+        title: record.extensionUiState.title,
+        editorText: record.extensionUiState.editorText,
+      };
+      session.clearQueue();
+      record.queuedMessages = [];
+      record.runningRunId = undefined;
+      record.status = "idle";
+      this.clearExtensionUiState(record);
+      this.cancelPendingHostUiRequests(record);
+      record.runtime = replacementRuntime;
+      record.session = replacementRuntime.session;
+      try {
+        await this.bindSessionRuntime(record);
+      } catch (error) {
+        record.unsubscribeAgent?.();
+        const replacementKey = sessionKey(record.ref);
+        try {
+          await replacementRuntime.dispose();
+        } catch (disposeError) {
+          console.warn(`[pi-sdk-driver] failed to dispose rejected replacement runtime for ${previousKey}:`, disposeError);
+        }
+        if (replacementKey !== previousKey) {
+          this.records.delete(replacementKey);
+          record.ref = previousRef;
+          this.records.set(previousKey, record);
+        }
+        record.runtime = previousRuntime;
+        record.session = session;
+        record.sessionFile = previousSessionFile;
+        record.sessionCommands = previousSessionCommands;
+        record.transcriptDiskMtimeMs = previousTranscriptDiskMtimeMs;
+        record.extensionUiState = previousExtensionUiState;
+        record.bindingExtensions = false;
+        record.unsubscribeAgent = this.subscribeAgentEvents(record, session);
+        throw error;
+      }
+
+      try {
+        await previousRuntime.dispose();
+      } catch (error) {
+        console.warn(`[pi-sdk-driver] failed to dispose replaced runtime for ${sessionKey(sessionRef)}:`, error);
+        session.dispose();
+      }
+      await this.syncRecordAfterSessionMutation(record, { emitUpdate: true });
+    });
   }
 
   async getSessionTree(sessionRef: SessionRef): Promise<SessionTreeSnapshot> {
@@ -890,9 +1294,12 @@ export class SessionSupervisor {
     options: NavigateSessionTreeOptions = {},
   ): Promise<NavigateSessionTreeResult> {
     const record = await this.ensureRecord(sessionRef);
-    const session = this.requireSession(record);
-    const result = await session.navigateTree(targetId, options);
-    if (result.cancelled || result.aborted) {
+    return this.withRuntimeOperation(record, async () => {
+      if (!this.isCurrentRecord(record)) return { cancelled: true };
+      const session = this.requireSession(record);
+      const result = await session.navigateTree(targetId, options);
+      if (!this.isCurrentRecord(record) || record.session !== session) return { cancelled: true };
+      if (result.cancelled || result.aborted) {
       return {
         cancelled: result.cancelled,
         ...(result.aborted ? { aborted: true } : {}),
@@ -901,13 +1308,14 @@ export class SessionSupervisor {
       };
     }
 
-    record.updatedAt = nowIso();
-    await this.syncRecordAfterSessionMutation(record, { emitUpdate: true });
-    return {
-      cancelled: false,
-      ...(result.editorText ? { editorText: result.editorText } : {}),
-      ...(result.summaryEntry ? { summaryCreated: true } : {}),
-    };
+      record.updatedAt = nowIso();
+      await this.syncRecordAfterSessionMutation(record, { emitUpdate: true });
+      return {
+        cancelled: false,
+        ...(result.editorText ? { editorText: result.editorText } : {}),
+        ...(result.summaryEntry ? { summaryCreated: true } : {}),
+      };
+    });
   }
 
   subscribe(sessionRef: SessionRef, listener: SessionEventListener): Unsubscribe {
@@ -928,55 +1336,88 @@ export class SessionSupervisor {
   }
 
   async closeSession(sessionRef: SessionRef): Promise<void> {
-    const record = this.records.get(sessionKey(sessionRef));
-    if (!record) {
-      return;
+    const requestedRecord = this.records.get(sessionKey(sessionRef));
+    if (requestedRecord) {
+      // Close admission before waiting on lifecycle/runtime queues. Already
+      // queued FIFO work is still allowed to drain below.
+      requestedRecord.closing = true;
     }
-
-    record.closed = true;
-    record.runningRunId = undefined;
-    record.status = "idle";
-    this.clearExtensionUiState(record);
-    this.cancelPendingHostUiRequests(record);
-
-    if (record.session) {
-      try {
-        await record.session.abort();
-      } catch {
-        // Best effort.
+    await this.withLifecycleOperation(async () => {
+      const key = sessionKey(sessionRef);
+      const record = this.records.get(key);
+      if (!record) {
+        return;
       }
-      record.unsubscribeAgent?.();
-      record.unsubscribeAgent = undefined;
-      // Guard dispose so a failure still lets us persist and emit sessionClosed
-      // below — otherwise the UI never learns the session closed.
-      await this.disposeRecordRuntimeSafely(record);
-    }
 
-    await this.persistSnapshot(record);
-    await this.emit(record, {
-      type: "sessionClosed",
-      sessionRef: record.ref,
-      timestamp: nowIso(),
-      reason: "manual",
+      // Runtime operations never acquire the lifecycle queue. This ordering is
+      // deliberate: lifecycle teardown may wait for an in-flight abort/prompt,
+      // without creating a lifecycle <-> runtime queue cycle.
+      await this.withRuntimeOperation(record, async () => {
+      if (this.records.get(key) !== record) {
+        return;
+      }
+
+      record.runningRunId = undefined;
+      record.status = "idle";
+      this.clearExtensionUiState(record);
+      this.cancelPendingHostUiRequests(record);
+
+      if (record.session) {
+        try {
+          await record.session.abort();
+        } catch {
+          // Best effort.
+        }
+        record.unsubscribeAgent?.();
+        record.unsubscribeAgent = undefined;
+        // Drain callbacks already accepted by the per-record FIFO before the
+        // close notification. No later runtime callback can enqueue after unsubscribe.
+        await record.eventQueue;
+        // Guard dispose so a failure still lets us persist and emit sessionClosed
+        // below — otherwise the UI never learns the session closed.
+        await this.disposeRecordRuntimeSafely(record);
+      }
+
+      record.closed = true;
+      await this.persistSnapshot(record);
+      await this.emit(record, {
+        type: "sessionClosed",
+        sessionRef: record.ref,
+        timestamp: nowIso(),
+        reason: "manual",
+      });
+      });
+      record.listeners.clear();
     });
+  }
+
+  private async ensureRecordInLifecycle(sessionRef: SessionRef): Promise<ManagedSessionRecord> {
+    const key = sessionKey(sessionRef);
+    const existing = this.records.get(key);
+    if (existing && existing.session && !existing.closed && !existing.closing) {
+      return existing;
+    }
+    return singleFlight(this.ensureRecordInFlight, key, () => this.createOrReopenRecord(sessionRef, key));
   }
 
   private async ensureRecord(sessionRef: SessionRef): Promise<ManagedSessionRecord> {
     const key = sessionKey(sessionRef);
     const existing = this.records.get(key);
-    if (existing && existing.session && !existing.closed) {
+    if (existing && existing.session && !existing.closed && !existing.closing) {
       return existing;
     }
 
     // Dedupe concurrent reopen/create for the same session. Without this, two
     // callers both pass the guard above, both build a runtime across the awaits
     // below, and the second overwrites (and leaks) the first.
-    return singleFlight(this.ensureRecordInFlight, key, () => this.createOrReopenRecord(sessionRef, key));
+    return singleFlight(this.ensureRecordInFlight, key, () =>
+      this.withLifecycleOperation(() => this.createOrReopenRecord(sessionRef, key)),
+    );
   }
 
   private async createOrReopenRecord(sessionRef: SessionRef, key: string): Promise<ManagedSessionRecord> {
     const existing = this.records.get(key);
-    if (existing && existing.session && !existing.closed) {
+    if (existing && existing.session && !existing.closed && !existing.closing) {
       return existing;
     }
 
@@ -1001,11 +1442,13 @@ export class SessionSupervisor {
     // conversation. Absent/dead/own leases never block (fully advisory).
     await this.assertSessionNotForeignLeased(sessionFile);
 
-    const runtime = await this.createAgentSessionRuntimeImpl({
-      cwd: workspace.path,
-      sessionManager: SessionManager.open(sessionFile),
-      ...(this.modelRegistry ? { modelRegistry: this.modelRegistry } : {}),
-    });
+    const createOptions = await this.createPersistedSessionOptions(workspaceToRef(workspace), sessionFile);
+
+    const runtime = await this.createRuntimeForSession(
+      workspaceToRef(workspace),
+      createOptions,
+      sessionRef,
+    );
     const session = runtime.session;
 
     const record = existing ?? this.createRecord(workspaceToRef(workspace), runtime, sessionEntry.title);
@@ -1021,11 +1464,23 @@ export class SessionSupervisor {
     record.closed = false;
 
     this.records.set(key, record);
-    await this.bindSessionRuntime(record);
+    try {
+      await this.bindSessionRuntime(record);
+    } catch (error) {
+      await this.cleanupFailedBinding(record, runtime, existing);
+      throw error;
+    }
+    // closeSession raises closing synchronously as an admission barrier. Only
+    // clear it after the replacement runtime is fully bound and valid.
+    record.closing = false;
     return record;
   }
 
-  private createRecord(workspace: WorkspaceRef, runtime: AgentSessionRuntime, title: string): ManagedSessionRecord {
+  private createRecord(
+    workspace: WorkspaceRef,
+    runtime: AgentSessionRuntime,
+    title: string,
+  ): ManagedSessionRecord {
     const session = runtime.session;
     const ref = {
       workspaceId: workspace.workspaceId,
@@ -1047,8 +1502,10 @@ export class SessionSupervisor {
       runningRunId: undefined,
       queuedMessages: [],
       closed: false,
+      closing: false,
       listeners: new Set<SessionEventListener>(),
       eventQueue: Promise.resolve(),
+      runtimeOperationQueue: Promise.resolve(),
       unsubscribeAgent: undefined,
       pendingHostUiRequests: new Map(),
       extensionUiState: createEmptyExtensionUiState(),
@@ -1056,8 +1513,108 @@ export class SessionSupervisor {
       sessionCommands: [],
       leasePath: undefined,
       transcriptDiskMtimeMs: undefined,
+      runtimeAdmissionBlocked: false,
+      runtimeAdmissionGate: undefined,
+      persistenceGeneration: 0,
     };
     return record;
+  }
+
+  private async createRuntimeForSession(
+    workspace: WorkspaceRef,
+    createOptions: CreateAgentSessionOptions,
+    sessionRef?: SessionRef,
+  ): Promise<AgentSessionRuntime> {
+    const profile = await this.sessionProfileFactory?.({
+      workspace: { ...workspace },
+      ...(sessionRef ? { sessionRef: { ...sessionRef } } : {}),
+    });
+    return this.createAgentSessionRuntimeImpl({
+      ...createOptions,
+      ...(this.agentDir ? { agentDir: this.agentDir } : {}),
+      ...(this.modelRuntime ? { modelRuntime: await this.modelRuntime } : {}),
+      ...(profile?.noTools !== undefined ? { noTools: profile.noTools } : {}),
+      ...(profile?.tools !== undefined ? { tools: [...profile.tools] } : {}),
+      ...(profile?.excludeTools !== undefined ? { excludeTools: [...profile.excludeTools] } : {}),
+      ...(profile?.customTools !== undefined ? { customTools: [...profile.customTools] } : {}),
+      ...(profile?.resourceLoaderOptions !== undefined ? { resourceLoaderOptions: profile.resourceLoaderOptions } : {}),
+    });
+  }
+
+  private async createPersistedSessionOptions(
+    workspace: WorkspaceRef,
+    sessionFile: string,
+    cwdOverride?: string,
+  ): Promise<CreateAgentSessionOptions> {
+    const sessionManager = SessionManager.open(sessionFile, undefined, cwdOverride);
+    const createOptions: CreateAgentSessionOptions = {
+      cwd: workspace.path,
+      sessionManager,
+    };
+    const persistedContext = sessionManager.buildSessionContext();
+    if (persistedContext.model) {
+      try {
+        const persistedModel = await this.resolveModel(persistedContext.model.provider, persistedContext.model.modelId);
+        if ((await this.modelRuntime)?.hasConfiguredAuth(persistedModel.provider)) {
+          createOptions.model = persistedModel;
+        }
+      } catch {
+        // The persisted model is no longer available; fall back to the runtime default.
+      }
+    }
+    if (persistedContext.thinkingLevel) {
+      createOptions.thinkingLevel = persistedContext.thinkingLevel as NonNullable<
+        CreateAgentSessionOptions["thinkingLevel"]
+      >;
+    }
+    return createOptions;
+  }
+
+  private async withLifecycleOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.lifecycleQueue;
+    let release!: () => void;
+    this.lifecycleQueue = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  private blockRuntimeAdmission(record: ManagedSessionRecord): readonly [ManagedSessionRecord, () => void] {
+    if (record.runtimeAdmissionBlocked) {
+      throw new Error(`Runtime admission already blocked for ${sessionKey(record.ref)}.`);
+    }
+    let release!: () => void;
+    record.runtimeAdmissionGate = new Promise<void>((resolve) => { release = resolve; });
+    record.runtimeAdmissionBlocked = true;
+    return [record, release];
+  }
+
+  private async withRuntimeOperation<T>(record: ManagedSessionRecord, operation: () => Promise<T>): Promise<T> {
+    if (record.runtimeAdmissionBlocked) {
+      await record.runtimeAdmissionGate;
+    }
+    const previous = record.runtimeOperationQueue;
+    let release!: () => void;
+    record.runtimeOperationQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  private isCurrentRecord(record: ManagedSessionRecord): boolean {
+    return !record.closed && !record.closing && this.records.get(sessionKey(record.ref)) === record;
+  }
+
+  private isCurrentSessionRecord(record: ManagedSessionRecord, session: AgentSession): boolean {
+    return this.isCurrentRecord(record) && record.session === session;
   }
 
   private getWritableSessionManager(record: ManagedSessionRecord): SessionManager {
@@ -1082,6 +1639,46 @@ export class SessionSupervisor {
     return record.runtime;
   }
 
+  private async cleanupFailedBinding(
+    record: ManagedSessionRecord,
+    runtime: AgentSessionRuntime,
+    previous: ManagedSessionRecord | undefined,
+    generatedSessionFile?: string,
+  ): Promise<void> {
+    record.unsubscribeAgent?.();
+    record.unsubscribeAgent = undefined;
+    record.bindingExtensions = false;
+    record.runtime = undefined;
+    record.session = undefined;
+    record.sessionCommands = [];
+    record.closed = Boolean(previous);
+    record.closing = false;
+    if (!previous && this.records.get(sessionKey(record.ref)) === record) {
+      this.records.delete(sessionKey(record.ref));
+    }
+    // Only create/fork pass ownership here. Reopen/rebind rollback passes no
+    // path, so pre-existing user JSONL files cannot be removed.
+    if (generatedSessionFile) {
+      try {
+        await unlink(generatedSessionFile);
+      } catch (error) {
+        if (!isMissingFileError(error)) {
+          console.warn(`[pi-sdk-driver] failed to remove generated session file ${generatedSessionFile}:`, error);
+        }
+      }
+      try {
+        await removeLeaseFile(sessionLeasePath(generatedSessionFile));
+      } catch (error) {
+        console.warn(`[pi-sdk-driver] failed to remove session lease for ${sessionKey(record.ref)}:`, error);
+      }
+    }
+    try {
+      await runtime.dispose();
+    } catch (error) {
+      console.warn(`[pi-sdk-driver] failed to dispose failed runtime for ${sessionKey(record.ref)}:`, error);
+    }
+  }
+
   private async disposeRecordRuntime(record: ManagedSessionRecord): Promise<void> {
     const runtime = record.runtime;
     const session = record.session;
@@ -1103,6 +1700,25 @@ export class SessionSupervisor {
    * loops (workspace removal/sync) and closeSession, where one runtime failing
    * to dispose must not skip disposing the rest or skip the sessionClosed emit.
    */
+  private async closeRemovedRecord(record: ManagedSessionRecord): Promise<void> {
+    // Do not dispose or remove the record until the already-admitted runtime
+    // operation completes. Marking closed first prevents new persistence work;
+    // the queue wait then gives an in-flight abort/prompt its final chance to
+    // settle before disposal.
+    record.closing = true;
+    record.unsubscribeAgent?.();
+    record.unsubscribeAgent = undefined;
+    await this.withRuntimeOperation(record, async () => {
+      await record.eventQueue;
+      record.closed = true;
+      await this.disposeRecordRuntimeSafely(record);
+    });
+    record.listeners.clear();
+    if (this.records.get(sessionKey(record.ref)) === record) {
+      this.records.delete(sessionKey(record.ref));
+    }
+  }
+
   private async disposeRecordRuntimeSafely(record: ManagedSessionRecord): Promise<void> {
     try {
       await this.disposeRecordRuntime(record);
@@ -1173,6 +1789,14 @@ export class SessionSupervisor {
     }
   }
 
+  async releaseAllLeases(): Promise<void> {
+    await Promise.all(
+      [...this.records.values()].map(async (record) => {
+        await this.releaseSessionLease(record);
+      }),
+    );
+  }
+
   private async rebindRuntimeSession(record: ManagedSessionRecord, session: AgentSession): Promise<void> {
     const previousKey = sessionKey(record.ref);
     const nextRef = {
@@ -1200,9 +1824,7 @@ export class SessionSupervisor {
     record.session = session;
     record.sessionFile = session.sessionFile ?? session.sessionManager.getSessionFile();
     record.unsubscribeAgent?.();
-    record.unsubscribeAgent = session.subscribe((event) => {
-      void this.handleAgentEvent(record, event);
-    });
+    record.unsubscribeAgent = this.subscribeAgentEvents(record, session);
     record.bindingExtensions = true;
     try {
       await session.bindExtensions({
@@ -1221,6 +1843,10 @@ export class SessionSupervisor {
           void this.emitExtensionError(record, error.extensionPath, error.event, error.error);
         },
       });
+    } catch (error) {
+      record.unsubscribeAgent?.();
+      record.unsubscribeAgent = undefined;
+      throw error;
     } finally {
       record.bindingExtensions = false;
     }
@@ -1239,6 +1865,29 @@ export class SessionSupervisor {
     });
     await this.rebindRuntimeSession(record, runtime.session);
     await this.refreshLeaseAndTranscriptBaseline(record);
+  }
+
+  private subscribeAgentEvents(record: ManagedSessionRecord, session: AgentSession): () => void {
+    return session.subscribe((event) => {
+      if (record.session !== session) {
+        return;
+      }
+      // Reconciliation blocks new runtime admissions, but callbacks already
+      // delivered by AgentSession must wait for the catalog replacement rather
+      // than being dropped. The event FIFO remains the ordering authority.
+      if (record.runtimeAdmissionBlocked) {
+        void record.runtimeAdmissionGate!.then(() => {
+          if (!record.closed && !record.closing && record.session === session) {
+            void this.handleAgentEvent(record, session, event);
+          }
+        });
+        return;
+      }
+      if (record.closing || record.closed) {
+        return;
+      }
+      void this.handleAgentEvent(record, session, event);
+    });
   }
 
   /** Claim the lease and capture the disk-tail baseline for the record's current file. */
@@ -1476,7 +2125,7 @@ export class SessionSupervisor {
       },
       getAllThemes: () => [],
       getTheme: () => undefined,
-      setTheme: () => ({ success: false, error: "Theme switching not supported in pi-gui host UI" }),
+      setTheme: () => ({ success: false, error: "Theme switching is not supported in the desktop host UI" }),
       getToolsExpanded: () => false,
       setToolsExpanded: () => {},
     };
@@ -1509,8 +2158,8 @@ export class SessionSupervisor {
     await session.followUp(text, images ? [...images] : undefined);
   }
 
-  private resolveModel(provider: string, modelId: string) {
-    const model = this.modelRegistry?.find(provider, modelId);
+  private async resolveModel(provider: string, modelId: string) {
+    const model = (await this.modelRuntime)?.getModel(provider, modelId);
     if (!model) {
       throw new Error(`Unknown model ${provider}:${modelId}`);
     }
@@ -1530,7 +2179,7 @@ export class SessionSupervisor {
 
   private async emitModelSelection(
     session: AgentSession,
-    model: ReturnType<SessionSupervisor["resolveModel"]>,
+    model: Awaited<ReturnType<SessionSupervisor["resolveModel"]>>,
     previousModel: AgentSession["model"],
   ): Promise<void> {
     const emitModelSelect = (session as unknown as {
@@ -1723,6 +2372,12 @@ export class SessionSupervisor {
     events: readonly SessionDriverEvent[],
     options?: {
       readonly persistSnapshot?: boolean;
+      /** Snapshot captured before queued work can observe a later run mutation. */
+      readonly terminalSnapshot?: SessionSnapshot;
+      readonly terminalSessionFile?: string;
+      /** Generation captured with a terminal snapshot; stale snapshots are skipped. */
+      readonly terminalPersistenceGeneration?: number;
+      readonly expectedSession?: AgentSession;
     },
   ): void {
     if (events.length === 0) {
@@ -1732,28 +2387,80 @@ export class SessionSupervisor {
     record.eventQueue = chainRecoveringEventQueue(
       record.eventQueue,
       async () => {
+        if (record.closed || (this.records && this.records.get(sessionKey(record.ref)) !== record)) {
+          return;
+        }
+        if (options?.expectedSession && record.session !== options.expectedSession) {
+          return;
+        }
+        let persistenceError: unknown;
         if (options?.persistSnapshot !== false) {
-          await this.persistSnapshot(record);
+          try {
+            await this.persistSnapshot(
+              record,
+              options?.terminalSnapshot,
+              options?.terminalSessionFile,
+              options?.terminalPersistenceGeneration,
+            );
+          } catch (error) {
+            // Catalog failure must not hide terminal UI events. Report it after
+            // the complete mapped batch is delivered; the queue recovers.
+            persistenceError = error;
+          }
+        }
+        if (record.closed || (this.records && this.records.get(sessionKey(record.ref)) !== record)) {
+          return;
+        }
+        if (options?.expectedSession && record.session !== options.expectedSession) {
+          return;
         }
         for (const event of events) {
+          if (options?.expectedSession && record.session !== options.expectedSession) {
+            return;
+          }
           await this.emit(record, event);
+        }
+        if (persistenceError) {
+          throw persistenceError;
         }
       },
       (error) => {
         // Contain the failure so the queue keeps flowing. A rethrow here would
         // leave record.eventQueue rejected and freeze the session forever.
-        console.warn(`[pi-sdk-driver] event queue work failed for ${sessionKey(record.ref)}:`, error);
+        console.warn(
+          `[pi-sdk-driver] event queue work failed for ${sessionKey(record.ref)} (${error instanceof Error ? error.name : "unknown"})`,
+        );
       },
     );
   }
 
-  private async handleAgentEvent(record: ManagedSessionRecord, event: AgentSessionEvent): Promise<void> {
+  private async handleAgentEvent(
+    record: ManagedSessionRecord,
+    expectedSession: AgentSession,
+    event: AgentSessionEvent,
+  ): Promise<void> {
+    if (record.closing || record.closed || record.session !== expectedSession) {
+      return;
+    }
     const mapped = this.mapAgentEvent(record, event);
     if (mapped.length === 0) {
       return;
     }
 
-    this.queueDriverEvents(record, mapped);
+    const persistSnapshot = event.type === "agent_end"
+      ? !event.willRetry
+      : event.type === "auto_retry_end"
+        ? !event.success
+        : false;
+    const terminalSnapshot = persistSnapshot ? buildSnapshot(record) : undefined;
+    const terminalPersistenceGeneration = persistSnapshot ? record.persistenceGeneration : undefined;
+    this.queueDriverEvents(record, mapped, {
+      expectedSession,
+      persistSnapshot,
+      ...(terminalSnapshot ? { terminalSnapshot } : {}),
+      ...(persistSnapshot && record.sessionFile ? { terminalSessionFile: record.sessionFile } : {}),
+      ...(terminalPersistenceGeneration !== undefined ? { terminalPersistenceGeneration } : {}),
+    });
   }
 
   private mapAgentEvent(record: ManagedSessionRecord, event: AgentSessionEvent): SessionDriverEvent[] {
@@ -1780,17 +2487,25 @@ export class SessionSupervisor {
         }
         this.updatePreviewFromMessage(record, event.message);
         return [sessionUpdatedEvent(record)];
-      case "message_update":
-        this.updatePreviewFromMessage(record, event.message);
-        if (event.message.role === "assistant" && event.assistantMessageEvent.type === "text_delta") {
-          return toDriverEvents({
-            type: "assistantDelta" as const,
-            sessionRef: record.ref,
-            timestamp,
-            text: event.assistantMessageEvent.delta ?? "",
-          }, record);
+      case "message_update": {
+        if (event.message) {
+          this.updatePreviewFromMessage(record, event.message);
+        }
+        const assistantMsgEvent = (event as { readonly assistantMessageEvent?: { readonly type?: string; readonly delta?: string; readonly text?: string } }).assistantMessageEvent;
+        const msgRole = event.message?.role ?? "assistant";
+        if (msgRole === "assistant" && assistantMsgEvent) {
+          const deltaText = assistantMsgEvent.delta ?? assistantMsgEvent.text ?? "";
+          if (deltaText && (assistantMsgEvent.type === "text_delta" || assistantMsgEvent.type === "thinking_delta" || !assistantMsgEvent.type)) {
+            return toDriverEvents({
+              type: "assistantDelta" as const,
+              sessionRef: record.ref,
+              timestamp,
+              text: deltaText,
+            }, record);
+          }
         }
         return [sessionUpdatedEvent(record)];
+      }
       case "tool_execution_start":
         record.status = "running";
         return toDriverEvents({
@@ -1801,15 +2516,16 @@ export class SessionSupervisor {
           callId: event.toolCallId,
           input: event.args,
         }, record);
-      case "tool_execution_update":
+      case "tool_execution_update": {
+        const update = normalizeToolUpdate(event.partialResult);
         return toDriverEvents({
           type: "toolUpdated" as const,
           sessionRef: record.ref,
           timestamp,
           callId: event.toolCallId,
-          ...(typeof event.partialResult === "string" ? { text: event.partialResult } : {}),
-          ...(typeof event.partialResult === "number" ? { progress: event.partialResult } : {}),
+          ...update,
         }, record);
+      }
       case "tool_execution_end":
         return toDriverEvents({
           type: "toolFinished" as const,
@@ -1823,10 +2539,15 @@ export class SessionSupervisor {
         return [sessionUpdatedEvent(record)];
       case "agent_end": {
         const outcome = determineRunOutcome(event.messages);
+        record.updatedAt = timestamp;
+        if (event.willRetry) {
+          record.status = "running";
+          return [sessionUpdatedEvent(record)];
+        }
+
         const runId = record.runningRunId;
         record.runningRunId = undefined;
         record.status = outcome.success ? "idle" : "failed";
-        record.updatedAt = timestamp;
         if (!outcome.success && outcome.error) {
           record.preview = outcome.error.message;
         }
@@ -1852,6 +2573,39 @@ export class SessionSupervisor {
           runId,
         );
       }
+      case "auto_retry_start":
+        record.status = "running";
+        record.updatedAt = timestamp;
+        return [sessionUpdatedEvent(record)];
+      case "auto_retry_end": {
+        record.updatedAt = timestamp;
+        if (event.success) {
+          if (!record.runningRunId) {
+            return [];
+          }
+          record.status = "running";
+          return [sessionUpdatedEvent(record)];
+        }
+
+        const runId = record.runningRunId;
+        if (!runId) {
+          return [];
+        }
+        const message = event.finalError?.trim() || "Automatic retry failed";
+        record.runningRunId = undefined;
+        record.status = "failed";
+        record.preview = message;
+        return toDriverEvents({
+          type: "runFailed" as const,
+          sessionRef: record.ref,
+          timestamp,
+          error: {
+            message,
+            code: "AUTO_RETRY_FAILED",
+            details: { attempt: event.attempt },
+          },
+        }, record, runId);
+      }
       default:
         return [];
     }
@@ -1876,9 +2630,23 @@ export class SessionSupervisor {
     }
   }
 
-  private async persistSnapshot(record: ManagedSessionRecord): Promise<void> {
-    const snapshot = buildSnapshot(record);
-    await this.catalogs.sessions.upsertSession({
+  private async persistSnapshot(
+    record: ManagedSessionRecord,
+    capturedSnapshot?: SessionSnapshot,
+    capturedSessionFile?: string,
+    capturedPersistenceGeneration?: number,
+  ): Promise<void> {
+    if (
+      capturedPersistenceGeneration !== undefined &&
+      capturedPersistenceGeneration !== record.persistenceGeneration
+    ) {
+      // Reconciliation installed newer catalog state. Keep FIFO event delivery,
+      // but skip this stale physical write; flush persists current live state.
+      return;
+    }
+    const snapshot = capturedSnapshot ?? buildSnapshot(record);
+    const sessionFilePath = capturedSessionFile ?? record.sessionFile;
+    const entry = {
       sessionRef: snapshot.ref,
       workspaceId: snapshot.ref.workspaceId,
       title: snapshot.title,
@@ -1886,11 +2654,9 @@ export class SessionSupervisor {
       status: snapshot.status,
       ...(snapshot.archivedAt !== undefined ? { archivedAt: snapshot.archivedAt } : {}),
       ...(snapshot.preview !== undefined ? { previewSnippet: snapshot.preview } : {}),
-      ...(record.sessionFile ? { sessionFilePath: record.sessionFile } : {}),
-    });
-    if (record.sessionFile) {
-      await this.catalogs.setSessionFile(record.ref, record.sessionFile);
-    }
+      ...(sessionFilePath !== undefined ? { sessionFilePath } : {}),
+    };
+    await this.catalogs.sessions.upsertSession(entry);
   }
 
   private collectSessionCommands(session: AgentSession): RuntimeCommandRecord[] {
@@ -1988,13 +2754,29 @@ export class SessionSupervisor {
 
   private async updateArchivedState(sessionRef: SessionRef, archivedAt: string | undefined): Promise<void> {
     const key = sessionKey(sessionRef);
-    const record = this.records.get(key);
+    const activeRecord = this.records.get(key);
+    if (activeRecord) {
+      await this.withRuntimeOperation(activeRecord, async () => {
+        if (!this.isCurrentRecord(activeRecord)) return;
+        await this.updateArchivedStateInternal(sessionRef, archivedAt, activeRecord);
+      });
+      return;
+    }
+    await this.withLifecycleOperation(() => this.updateArchivedStateInternal(sessionRef, archivedAt));
+  }
+
+  private async updateArchivedStateInternal(
+    sessionRef: SessionRef,
+    archivedAt: string | undefined,
+    knownRecord?: ManagedSessionRecord,
+  ): Promise<void> {
+    const key = sessionKey(sessionRef);
+    const record = knownRecord;
     if (record) {
-      if (record.archivedAt === archivedAt) {
-        return;
-      }
+      if (record.archivedAt === archivedAt) return;
       record.archivedAt = archivedAt;
       await this.persistSnapshot(record);
+      if (!this.isCurrentRecord(record)) return;
       await this.emit(record, sessionUpdatedEvent(record));
       return;
     }
@@ -2022,6 +2804,19 @@ export class SessionSupervisor {
 
     await this.catalogs.sessions.upsertSession(nextEntry);
   }
+}
+
+export function mergeSessionResourceLoaderOptions(
+  defaultExtensionFactories: readonly ExtensionFactory[] | undefined,
+  sessionOptions: PiCreateAgentSessionOptions["resourceLoaderOptions"] | undefined,
+): NonNullable<PiCreateAgentSessionOptions["resourceLoaderOptions"]> {
+  return {
+    ...(defaultExtensionFactories ? { extensionFactories: [...defaultExtensionFactories] } : {}),
+    ...sessionOptions,
+    ...(sessionOptions?.extensionFactories
+      ? { extensionFactories: [...sessionOptions.extensionFactories] }
+      : {}),
+  };
 }
 
 function resolvedCatalogSessionTitle(existingTitle: string | undefined, infoTitle: string): string {
@@ -2116,6 +2911,14 @@ function findBranchEntryForRenderedMessageIndex(
     branchStartIndex = branchIndex + 1;
   }
   return undefined;
+}
+
+async function removeGeneratedForkSession(sessionFile: string | undefined): Promise<void> {
+  if (!sessionFile) {
+    return;
+  }
+  await removeIntermediateForkSession(sessionFile, undefined);
+  await removeLeaseFile(sessionLeasePath(sessionFile));
 }
 
 async function removeIntermediateForkSession(

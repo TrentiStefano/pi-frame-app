@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { WorkspaceRecord, WorktreeRecord } from "./desktop-state";
 import type { DiffPanelFileRequest, FileWorkbenchContext } from "./diff-panel-types";
-import type { ChangedFileEntry, ChangedFilesResult, PiDesktopApi, WorkspaceFilePreview } from "./ipc";
+import type { ChangedFileEntry, PiDesktopApi, WorkspaceFilePreview } from "./ipc";
 import { InlineDiff } from "./diff-inline";
-import { FileIcon, FolderIcon, RefreshIcon } from "./icons";
+import { CloseIcon, FileIcon, FolderIcon, RefreshIcon } from "./icons";
 import { extensionToLanguage } from "./syntax-highlight";
 import { loadReviewed, pruneReviewed, saveReviewed } from "./reviewed-files-store";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
+import { MessageMarkdown } from "./message-markdown";
 
 interface WorkbenchChangedFile extends ChangedFileEntry {
   readonly workspaceId: string;
@@ -33,6 +36,7 @@ interface DiffPanelProps {
   readonly sessionStatus: string | undefined;
   readonly fileRequest?: DiffPanelFileRequest | null;
   readonly contexts: readonly FileWorkbenchContext[];
+  readonly onEnsureExpanded?: () => void;
 }
 
 export function DiffPanel({
@@ -43,10 +47,12 @@ export function DiffPanel({
   sessionStatus,
   fileRequest,
   contexts,
+  onEnsureExpanded,
 }: DiffPanelProps) {
+  const { t } = useTranslation();
   const [filesByWorkspace, setFilesByWorkspace] = useState<Readonly<Record<string, readonly string[]>>>({});
   const [changedByWorkspace, setChangedByWorkspace] =
-    useState<Readonly<Record<string, ChangedFilesResult>>>({});
+    useState<Readonly<Record<string, readonly ChangedFileEntry[]>>>({});
   const [activeWorkspaceId, setActiveWorkspaceId] = useState(workspaceId);
   const [selectedFile, setSelectedFile] = useState<FileSelection | null>(null);
   const [viewerMode, setViewerMode] = useState<"preview" | "diff">("preview");
@@ -69,34 +75,15 @@ export function DiffPanel({
   const activeTree = useMemo(() => buildFileTree(activeFiles), [activeFiles]);
   const changedGroups = useMemo(
     () =>
-      contexts.map((context) => {
-        const result = changedByWorkspace[context.workspace.id];
-        return {
-          context,
-          error: result?.state === "unavailable" ? result.error : undefined,
-          pending: result === undefined,
-          files:
-            result?.state === "available"
-              ? result.files.map((file) => toWorkbenchChangedFile(context, file))
-              : [],
-        };
-      }),
+      contexts.map((context) => ({
+        context,
+        files: (changedByWorkspace[context.workspace.id] ?? []).map((file) =>
+          toWorkbenchChangedFile(context, file),
+        ),
+      })),
     [changedByWorkspace, contexts],
   );
   const changedRows = useMemo(() => changedGroups.flatMap((group) => group.files), [changedGroups]);
-  const unavailableChangedGroupCount = useMemo(
-    () => changedGroups.reduce((count, group) => count + (group.error ? 1 : 0), 0),
-    [changedGroups],
-  );
-  const pendingChangedGroupCount = useMemo(
-    () => changedGroups.reduce((count, group) => count + (group.pending ? 1 : 0), 0),
-    [changedGroups],
-  );
-  const changedFilesSummary = buildChangedFilesSummary(
-    changedRows.length,
-    unavailableChangedGroupCount,
-    pendingChangedGroupCount,
-  );
   const changedRowsRef = useRef(changedRows);
   changedRowsRef.current = changedRows;
   const filesByWorkspaceRef = useRef(filesByWorkspace);
@@ -144,7 +131,7 @@ export function DiffPanel({
           return;
         }
         const nextFilesByWorkspace: Record<string, readonly string[]> = {};
-        const nextChangedByWorkspace: Record<string, ChangedFilesResult> = {};
+        const nextChangedByWorkspace: Record<string, readonly ChangedFileEntry[]> = {};
         for (const result of results) {
           nextFilesByWorkspace[result.workspaceId] = result.workspaceFiles;
           nextChangedByWorkspace[result.workspaceId] = result.changedFiles;
@@ -155,34 +142,18 @@ export function DiffPanel({
           if (!current) {
             return null;
           }
-          const changedResult = nextChangedByWorkspace[current.workspaceId];
-          const changedFiles = changedResult?.state === "available" ? changedResult.files : [];
           const availableFiles = new Set([
             ...(nextFilesByWorkspace[current.workspaceId] ?? []),
-            ...changedFiles.map((file) => file.path),
+            ...(nextChangedByWorkspace[current.workspaceId] ?? []).map((file) => file.path),
           ]);
           return availableFiles.has(current.path) ? current : null;
         });
         setReviewed((current) => {
-          const unavailableWorkspaceIds = new Set(
-            results
-              .filter((result) => result.changedFiles.state === "unavailable")
-              .map((result) => result.workspaceId),
-          );
-          const retainedUnavailableKeys = [...current].filter((key) => {
-            const reviewedWorkspaceId = workspaceIdFromReviewedFileKey(key);
-            return reviewedWorkspaceId !== undefined && unavailableWorkspaceIds.has(reviewedWorkspaceId);
-          });
           const pruned = pruneReviewed(
             current,
-            [
-              ...results.flatMap((result) =>
-                result.changedFiles.state === "available"
-                  ? result.changedFiles.files.map((file) => reviewedFileKey(result.workspaceId, file.path))
-                  : [],
-              ),
-              ...retainedUnavailableKeys,
-            ],
+            results.flatMap((result) =>
+              result.changedFiles.map((file) => reviewedFileKey(result.workspaceId, file.path)),
+            ),
           );
           if (pruned !== current) {
             saveReviewed(workspaceId, sessionId, pruned);
@@ -306,7 +277,7 @@ export function DiffPanel({
   }, [selectedFile, changedRows]);
 
   const handleStage = (file: WorkbenchChangedFile) => {
-    void api.stageFile(file.workspaceId, file.path, file.stagingSourcePath).then(() => refresh());
+    void api.stageFile(file.workspaceId, file.path).then(() => refresh());
   };
 
   const toggleReviewed = useCallback(
@@ -343,19 +314,19 @@ export function DiffPanel({
     <section className={`diff-panel file-workbench file-workbench--${panelMode}`}>
       <div className="diff-panel__header file-workbench__header">
         <div className="file-workbench__heading">
-          <h2 className="diff-panel__title">{panelMode === "changes" ? "Changes" : "Files"}</h2>
-          <span className="file-workbench__subtitle">{buildSubtitle(activeContext)}</span>
+          <h2 className="diff-panel__title">{panelMode === "changes" ? t("files.changes") : t("files.files")}</h2>
+          <span className="file-workbench__subtitle">{buildSubtitle(activeContext, t)}</span>
         </div>
         {showReviewCounter ? (
           <span className="diff-panel__counter" data-testid="diff-panel-counter">
-            {`Reviewed ${reviewedCount} of ${changedRows.length}`}
+            {t("files.reviewed", { reviewed: reviewedCount, total: changedRows.length })}
           </span>
         ) : null}
         <button
           className="icon-button"
           type="button"
           onClick={() => refresh({ force: true })}
-          aria-label="Refresh"
+          aria-label={t("common.refresh")}
           disabled={loading}
         >
           <RefreshIcon />
@@ -363,11 +334,10 @@ export function DiffPanel({
       </div>
 
       {showContextStrip ? (
-        <div className="file-workbench__context-strip" aria-label="File scopes">
+        <div className="file-workbench__context-strip" aria-label={t("files.scopes")}>
           {contexts.map((context) => {
             const isActive = activeContext?.workspace.id === context.workspace.id;
-            const changedResult = changedByWorkspace[context.workspace.id];
-            const changeCount = changedResult?.state === "available" ? changedResult.files.length : 0;
+            const changeCount = changedByWorkspace[context.workspace.id]?.length ?? 0;
             return (
               <button
                 className={`file-workbench__context ${isActive ? "file-workbench__context--active" : ""}`}
@@ -375,166 +345,167 @@ export function DiffPanel({
                 type="button"
                 onClick={() => setActiveWorkspaceId(context.workspace.id)}
               >
-                <span>{contextLabel(context)}</span>
-                <strong>
-                  {changedResult === undefined
-                    ? "Loading"
-                    : changedResult.state === "unavailable"
-                      ? "Unavailable"
-                      : changeCount}
-                </strong>
+                <span>{contextLabel(context, t)}</span>
+                <strong>{changeCount}</strong>
               </button>
             );
           })}
         </div>
       ) : null}
 
-      <div className="file-workbench__body">
-        {panelMode === "files" ? (
-          <section className="file-workbench__section file-workbench__section--tree" aria-label="Workspace file tree">
-            <div className="file-workbench__section-header">
-              <span>Workspace tree</span>
-              <span>{activeFiles.length}</span>
+      <div className={`file-workbench__content ${selectedFile ? "file-workbench__content--two-columns" : ""}`}>
+        {selectedFile ? (
+          <div className="diff-panel__viewer file-workbench__viewer">
+            <div className="diff-panel__viewer-header file-workbench__viewer-header">
+              <span className="file-workbench__viewer-title" title={selectedFile.path}>{selectedFile.path}</span>
+              <div className="file-workbench__viewer-controls">
+                {panelMode === "changes" ? (
+                  <span className="file-workbench__viewer-modes" role="group" aria-label={t("files.viewerMode")}>
+                    <button
+                      className={viewerMode === "preview" ? "file-workbench__mode file-workbench__mode--active" : "file-workbench__mode"}
+                      type="button"
+                      onClick={() => setViewerMode("preview")}
+                    >
+                      {t("files.preview")}
+                    </button>
+                    <button
+                      className={viewerMode === "diff" ? "file-workbench__mode file-workbench__mode--active" : "file-workbench__mode"}
+                      type="button"
+                      onClick={() => setViewerMode("diff")}
+                    >
+                      {t("files.diff")}
+                    </button>
+                  </span>
+                ) : null}
+                <button
+                  className="icon-button file-workbench__close-viewer"
+                  type="button"
+                  onClick={() => setSelectedFile(null)}
+                  aria-label={t("common.close", { defaultValue: "Close preview" })}
+                  title={t("common.close", { defaultValue: "Close preview" })}
+                >
+                  <CloseIcon />
+                </button>
+              </div>
             </div>
-            {activeTree.length === 0 ? (
-              <div className="diff-panel__empty">No indexed files</div>
-            ) : (
-              <div className="file-workbench__tree" data-testid="file-workbench-tree">
-                {activeTree.map((node) => (
-                  <FileTreeRow
-                    key={node.path || node.name}
-                    node={node}
-                    depth={0}
-                    selectedFile={selectedFile}
-                    activeWorkspaceId={activeContext?.workspace.id ?? workspaceId}
-                    onSelect={(path) => {
-                      const nextWorkspaceId = activeContext?.workspace.id ?? workspaceId;
-                      setViewerMode("preview");
-                      setSelectedFile({ workspaceId: nextWorkspaceId, path });
-                    }}
-                  />
-                ))}
-              </div>
-            )}
-          </section>
-        ) : (
-          <section className="file-workbench__section file-workbench__section--changes" aria-label="Changed files">
-            <div className="file-workbench__section-header">
-              <span>Changed files</span>
-              <span>{changedFilesSummary}</span>
-            </div>
-            {changedRows.length === 0 && unavailableChangedGroupCount === 0 ? (
-              <div className="diff-panel__empty">
-                {pendingChangedGroupCount > 0 ? "Loading changes..." : "No changes"}
-              </div>
-            ) : (
-              <div className="diff-panel__file-list" ref={fileListRef}>
-                {changedGroups.map((group) =>
-                  group.files.length === 0 && !group.error ? null : (
-                    <div className="file-workbench__change-group" key={group.context.workspace.id}>
-                      {showContextStrip ? (
-                        <div className="file-workbench__change-heading">
-                          <span>{contextLabel(group.context)}</span>
-                          <span>{group.error ? "Unavailable" : group.files.length}</span>
-                        </div>
-                      ) : null}
-                      {group.error ? (
-                        <div
-                          className="diff-panel__empty diff-panel__unavailable"
-                          data-testid="changed-files-unavailable"
-                          role="status"
-                        >
-                          {group.error.message}
-                        </div>
-                      ) : group.files.map((file) => {
-                        const isReviewed = reviewed.has(reviewedFileKey(file.workspaceId, file.path));
-                        const isSelected =
-                          viewerMode === "diff" &&
-                          selectedFile?.workspaceId === file.workspaceId &&
-                          selectedFile.path === file.path;
-                        const className = [
-                          "diff-panel__file",
-                          isSelected ? "diff-panel__file--selected" : "",
-                          isReviewed ? "diff-panel__file--reviewed" : "",
-                        ]
-                          .filter(Boolean)
-                          .join(" ");
-                        return (
-                          <div className={className} key={`${file.workspaceId}:${file.path}`} data-file-path={file.path}>
-                            <input
-                              aria-label={`Mark ${file.path} reviewed`}
-                              className="diff-panel__reviewed-checkbox"
-                              data-testid={`diff-panel-reviewed-${file.path}`}
-                              type="checkbox"
-                              checked={isReviewed}
-                              onChange={() => toggleReviewed(file)}
-                            />
-                            <button
-                              className="diff-panel__file-name"
-                              type="button"
-                              onClick={() => {
-                                setViewerMode("diff");
-                                setSelectedFile(
-                                  isSelected ? null : { workspaceId: file.workspaceId, path: file.path },
-                                );
-                              }}
-                            >
-                              <span className={`diff-panel__status-dot diff-panel__status-dot--${file.status}`} />
-                              <span className="diff-panel__file-path">{formatPathForDisplay(file.path)}</span>
-                              <span className="file-workbench__status-label">{statusLabel(file)}</span>
-                            </button>
-                            <button
-                              className="diff-panel__stage-btn"
-                              type="button"
-                              onClick={() => handleStage(file)}
-                              disabled={file.staged}
-                            >
-                              {file.staged ? "Staged" : "Stage"}
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ),
-                )}
-              </div>
-            )}
-          </section>
-        )}
-      </div>
+            {renderViewer({
+              selectedFile,
+              viewerMode,
+              viewerLoading,
+              viewerError,
+              preview,
+              diffText,
+              t,
+            })}
+          </div>
+        ) : null}
 
-      <div className="diff-panel__viewer file-workbench__viewer">
-        <div className="diff-panel__viewer-header file-workbench__viewer-header">
-          <span className="file-workbench__viewer-path">
-            {selectedFile ? formatPathForDisplay(selectedFile.path) : "Select a file"}
-          </span>
-          {selectedFile && panelMode === "changes" ? (
-            <span className="file-workbench__viewer-modes" role="group" aria-label="Viewer mode">
-              <button
-                className={viewerMode === "preview" ? "file-workbench__mode file-workbench__mode--active" : "file-workbench__mode"}
-                type="button"
-                onClick={() => setViewerMode("preview")}
-              >
-                File
-              </button>
-              <button
-                className={viewerMode === "diff" ? "file-workbench__mode file-workbench__mode--active" : "file-workbench__mode"}
-                type="button"
-                onClick={() => setViewerMode("diff")}
-              >
-                Diff
-              </button>
-            </span>
-          ) : null}
+        <div className="file-workbench__body">
+          {panelMode === "files" ? (
+            <section className="file-workbench__section file-workbench__section--tree" aria-label={t("files.workspaceTree")}>
+              <div className="file-workbench__section-header">
+                <span>{t("files.workspaceTree")}</span>
+                <span>{activeFiles.length}</span>
+              </div>
+              {activeTree.length === 0 ? (
+                <div className="diff-panel__empty">{t("files.noIndexedFiles")}</div>
+              ) : (
+                <div className="file-workbench__tree" data-testid="file-workbench-tree">
+                  {activeTree.map((node) => (
+                    <FileTreeRow
+                      key={node.path || node.name}
+                      node={node}
+                      depth={0}
+                      selectedFile={selectedFile}
+                      activeWorkspaceId={activeContext?.workspace.id ?? workspaceId}
+                      onSelect={(path) => {
+                        const nextWorkspaceId = activeContext?.workspace.id ?? workspaceId;
+                        setViewerMode("preview");
+                        setSelectedFile({ workspaceId: nextWorkspaceId, path });
+                        onEnsureExpanded?.();
+                      }}
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
+          ) : (
+            <section className="file-workbench__section file-workbench__section--changes" aria-label={t("files.changedFiles")}>
+              <div className="file-workbench__section-header">
+                <span>{t("files.changedFiles")}</span>
+                <span>{changedRows.length}</span>
+              </div>
+              {changedRows.length === 0 ? (
+                <div className="diff-panel__empty">{t("files.noChanges")}</div>
+              ) : (
+                <div className="diff-panel__file-list" ref={fileListRef}>
+                  {changedGroups.map((group) =>
+                    group.files.length === 0 ? null : (
+                      <div className="file-workbench__change-group" key={group.context.workspace.id}>
+                        {showContextStrip ? (
+                          <div className="file-workbench__change-heading">
+                            <span>{contextLabel(group.context, t)}</span>
+                            <span>{group.files.length}</span>
+                          </div>
+                        ) : null}
+                        {group.files.map((file) => {
+                          const isReviewed = reviewed.has(reviewedFileKey(file.workspaceId, file.path));
+                          const isSelected =
+                            viewerMode === "diff" &&
+                            selectedFile?.workspaceId === file.workspaceId &&
+                            selectedFile.path === file.path;
+                          const className = [
+                            "diff-panel__file",
+                            isSelected ? "diff-panel__file--selected" : "",
+                            isReviewed ? "diff-panel__file--reviewed" : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" ");
+                          return (
+                            <div className={className} key={`${file.workspaceId}:${file.path}`} data-file-path={file.path}>
+                              <input
+                                aria-label={t("files.markReviewed", { path: file.path })}
+                                className="diff-panel__reviewed-checkbox"
+                                data-testid={`diff-panel-reviewed-${file.path}`}
+                                type="checkbox"
+                                checked={isReviewed}
+                                onChange={() => toggleReviewed(file)}
+                              />
+                              <button
+                                className="diff-panel__file-name"
+                                type="button"
+                                onClick={() => {
+                                  setViewerMode("diff");
+                                  const next = isSelected ? null : { workspaceId: file.workspaceId, path: file.path };
+                                  setSelectedFile(next);
+                                  if (next) {
+                                    onEnsureExpanded?.();
+                                  }
+                                }}
+                              >
+                                <span className={`diff-panel__status-dot diff-panel__status-dot--${file.status}`} />
+                                <span>{file.path}</span>
+                                <span className="file-workbench__status-label">{statusLabel(file)}</span>
+                              </button>
+                              <button
+                                className="diff-panel__stage-btn"
+                                type="button"
+                                onClick={() => handleStage(file)}
+                                disabled={file.staged}
+                              >
+                                {file.staged ? t("files.staged") : t("files.stage")}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ),
+                  )}
+                </div>
+              )}
+            </section>
+          )}
         </div>
-        {renderViewer({
-          selectedFile,
-          viewerMode,
-          viewerLoading,
-          viewerError,
-          preview,
-          diffText,
-        })}
       </div>
     </section>
   );
@@ -596,6 +567,7 @@ function renderViewer({
   viewerError,
   preview,
   diffText,
+  t,
 }: {
   readonly selectedFile: FileSelection | null;
   readonly viewerMode: "preview" | "diff";
@@ -603,12 +575,13 @@ function renderViewer({
   readonly viewerError: string | null;
   readonly preview: WorkspaceFilePreview | null;
   readonly diffText: string;
+  readonly t: TFunction;
 }) {
   if (!selectedFile) {
-    return <div className="diff-panel__empty">Select a file from the tree or changed files.</div>;
+    return <div className="diff-panel__empty">{t("files.selectFile")}</div>;
   }
   if (viewerLoading) {
-    return <div className="diff-panel__empty">Loading {viewerMode}...</div>;
+    return <div className="diff-panel__empty">{t("files.loading", { mode: t(`files.${viewerMode}`) })}</div>;
   }
   if (viewerError) {
     return <div className="diff-panel__empty">{viewerError}</div>;
@@ -617,19 +590,27 @@ function renderViewer({
     return diffText ? (
       <InlineDiff diff={diffText} language={extensionToLanguage(selectedFile.path)} />
     ) : (
-      <div className="diff-panel__empty">No diff available for this file.</div>
+      <div className="diff-panel__empty">{t("files.noDiff")}</div>
     );
   }
   if (!preview) {
-    return <div className="diff-panel__empty">No preview available.</div>;
+    return <div className="diff-panel__empty">{t("files.noPreview")}</div>;
   }
   if (preview.binary) {
-    return <div className="diff-panel__empty">Binary or directory preview is not available.</div>;
+    return <div className="diff-panel__empty">{t("files.binaryUnavailable")}</div>;
+  }
+  if (/\.md(?:own)?$/i.test(selectedFile.path)) {
+    return (
+      <div className="file-workbench__rich-preview" data-testid="file-workbench-preview">
+        <MessageMarkdown text={preview.content} />
+        {preview.truncated ? <p className="file-workbench__truncated">{t("files.previewTruncated")}</p> : null}
+      </div>
+    );
   }
   return (
     <pre className="file-workbench__preview" data-testid="file-workbench-preview">
       {preview.content}
-      {preview.truncated ? "\n\n[Preview truncated]" : ""}
+      {preview.truncated ? `\n\n[${t("files.previewTruncated")}]` : ""}
     </pre>
   );
 }
@@ -703,24 +684,9 @@ function reviewedFileKey(workspaceId: string, filePath: string): string {
   return JSON.stringify([workspaceId, filePath]);
 }
 
-function workspaceIdFromReviewedFileKey(key: string): string | undefined {
-  try {
-    const value: unknown = JSON.parse(key);
-    return Array.isArray(value) && value.length === 2 && typeof value[0] === "string"
-      ? value[0]
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function formatPathForDisplay(path: string): string {
-  return JSON.stringify(path);
-}
-
-function contextLabel(context: FileWorkbenchContext): string {
+function contextLabel(context: FileWorkbenchContext, t: TFunction): string {
   if (context.role === "thread") {
-    return "Current thread";
+    return t("files.currentThread");
   }
   if (context.role === "worktree") {
     return context.worktree?.branchName ?? context.workspace.branchName ?? context.workspace.name;
@@ -728,12 +694,12 @@ function contextLabel(context: FileWorkbenchContext): string {
   return context.workspace.name;
 }
 
-function buildSubtitle(context: FileWorkbenchContext | undefined): string {
+function buildSubtitle(context: FileWorkbenchContext | undefined, t: TFunction): string {
   if (!context) {
-    return "No workspace selected";
+    return t("files.noWorkspace");
   }
   if (context.role === "worktree") {
-    return `Worktree ${context.worktree?.branchName ?? context.workspace.name}`;
+    return t("files.worktreeName", { name: context.worktree?.branchName ?? context.workspace.name });
   }
   return context.workspace.path;
 }
@@ -741,17 +707,4 @@ function buildSubtitle(context: FileWorkbenchContext | undefined): string {
 function statusLabel(file: WorkbenchChangedFile): string {
   const branch = file.branchName ? ` · ${file.branchName}` : "";
   return `${file.status}${branch}`;
-}
-
-function buildChangedFilesSummary(
-  changedCount: number,
-  unavailableCount: number,
-  pendingCount: number,
-): string {
-  const parts = [
-    changedCount > 0 ? String(changedCount) : "",
-    unavailableCount > 0 ? `${unavailableCount} unavailable` : "",
-    pendingCount > 0 ? `${pendingCount} loading` : "",
-  ].filter(Boolean);
-  return parts.length > 0 ? parts.join(" · ") : "0";
 }

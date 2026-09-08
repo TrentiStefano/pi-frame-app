@@ -2,7 +2,7 @@
 
 Codex-style Electron shell for `pi`, with Playwright E2E coverage organized by test lane.
 
-macOS remains the source of truth for desktop UI verification. Linux is supported for packaging and manual validation, with CI packaging checks to catch AppImage regressions.
+Windows, macOS, and Linux are supported desktop targets. Verify each platform on its real Electron or packaged surface.
 
 ## Setup
 
@@ -16,42 +16,50 @@ pnpm install
 Build the desktop app:
 
 ```bash
-pnpm --filter @pi-gui/desktop build
+pnpm --filter @pi-frame/desktop build
 ```
 
 Run the app in development:
 
 ```bash
-pnpm --filter @pi-gui/desktop dev
+pnpm --filter @pi-frame/desktop dev
 ```
 
-`dev` now runs through `electron-vite`, so renderer edits hot-update in place and Electron `main` / `preload` changes trigger the appropriate reload or restart behavior automatically. The desktop dev launcher also rebuilds the shared workspace packages up front and keeps them in watch mode so Node-side package changes can be picked up without manual rebuilds.
+`dev` now runs through `electron-vite`, so renderer edits hot-update in place and Electron `main` / `preload` changes trigger the appropriate reload or restart behavior automatically. The desktop dev launcher also rebuilds the shared workspace packages up front and keeps them in watch mode so Node-side package changes can be picked up without manual rebuilds. It prefers port `5173` and automatically selects the next available port when that default is occupied; set `PI_APP_DEV_PORT` to require a specific port.
 
 Run the built app locally without packaging:
 
 ```bash
-pnpm --filter @pi-gui/desktop preview
+pnpm --filter @pi-frame/desktop preview
 ```
+
+Package macOS artifacts, including the native notification-permission helper:
+
+```bash
+pnpm --filter @pi-frame/desktop run package:mac
+```
+
+`package` remains an alias for `package:mac` for compatibility. Common `build` and non-macOS packaging do not build or include the Swift notification helper.
 
 Package a Linux AppImage locally:
 
 ```bash
-pnpm --filter @pi-gui/desktop run package:linux
+pnpm --filter @pi-frame/desktop run package:linux
 ```
 
 Package Windows installers locally:
 
 ```bash
-pnpm --filter @pi-gui/desktop run package:win
+pnpm --filter @pi-frame/desktop run package:win
 ```
 
 Unpacked Windows build (faster iteration):
 
 ```bash
-pnpm --filter @pi-gui/desktop run package:win:dir
+pnpm --filter @pi-frame/desktop run package:win:dir
 ```
 
-On Windows, `package:win*` routes through `scripts/package-windows.mjs`, which prefers the ASCII repo-local `tools/pnpm.cmd` shim and redirects `ELECTRON_BUILDER_CACHE` / `LOCALAPPDATA` into `.cache/` under the repo. This avoids electron-builder failures when `pnpm` lives under a non-ASCII `%USERPROFILE%` or when Developer Mode / elevation is unavailable for winCodeSign symlink extraction. Set `ELECTRON_MIRROR` if Electron downloads are flaky in your region.
+On Windows, `package:win*` routes through `scripts/package-windows.mjs`, which prefers the ASCII repo-local `tools/pnpm.cmd` shim, deploys a lockfile-pinned production dependency tree to avoid electron-builder's slow pnpm hoister, and redirects `ELECTRON_BUILDER_CACHE` / `LOCALAPPDATA` into `.cache/` under the repo. This avoids electron-builder failures when `pnpm` lives under a non-ASCII `%USERPROFILE%` or when Developer Mode / elevation is unavailable for winCodeSign symlink extraction. Electron and electron-builder tool downloads default to npmmirror; set `ELECTRON_MIRROR` or `ELECTRON_BUILDER_BINARIES_MIRROR` to override either source.
 
 Live agent tests use your existing `pi` runtime and provider auth. If local `pi` runs do not work, the `live` lane will not be meaningful either.
 
@@ -63,61 +71,80 @@ Use the smallest lane that matches the changed surface.
   Background-friendly Electron UI coverage. This is the default lane for renderer, sidebar, composer, persistence, settings, skills, and worktree UI behavior.
 
   ```bash
-  pnpm --filter @pi-gui/desktop run test:e2e
-  pnpm --filter @pi-gui/desktop run test:e2e:core
+  pnpm --filter @pi-frame/desktop run test:e2e
+  pnpm --filter @pi-frame/desktop run test:e2e:core
   ```
 
 - `live`
   Real runtime/provider coverage. Use this when the change depends on an actual run, transcript item, tool call, or background notification.
 
   ```bash
-  pnpm --filter @pi-gui/desktop run test:e2e:live
+  pnpm --filter @pi-frame/desktop run test:e2e:live
   ```
 
 - `native`
   macOS OS-surface coverage such as folder pickers, image pickers, and real clipboard paste. This lane is foreground-only and can take focus.
 
   ```bash
-  pnpm --filter @pi-gui/desktop run test:e2e:native
+  pnpm --filter @pi-frame/desktop run test:e2e:native
   ```
 
 - `production`
   Opt-in higher-fidelity smokes that stay out of the default fast lanes. Use these for real-auth `live` checks, packaged `.app` launch, and real macOS open-panel coverage.
 
   ```bash
-  pnpm --filter @pi-gui/desktop run test:prod:real-auth-contract
-  pnpm --filter @pi-gui/desktop run test:prod:packaged-smoke
-  pnpm --filter @pi-gui/desktop run test:prod:packaged-computer-use-parity
-  pnpm --filter @pi-gui/desktop run test:prod:packaged-computer-use-background
-  pnpm --filter @pi-gui/desktop run test:prod:applications-relaunch
-  pnpm --filter @pi-gui/desktop run test:prod:release-zip-smoke
-  pnpm --filter @pi-gui/desktop run test:prod:open-folder-real
+  pnpm --filter @pi-frame/desktop run test:prod:real-auth-contract
+  pnpm --filter @pi-frame/desktop run test:prod:packaged-smoke
+  pnpm --filter @pi-frame/desktop run test:prod:packaged-terminal
+  pnpm --filter @pi-frame/desktop run test:live:computer-use
+  pnpm --filter @pi-frame/desktop run test:prod:applications-relaunch
+  pnpm --filter @pi-frame/desktop run test:prod:release-zip-smoke
+  pnpm --filter @pi-frame/desktop run test:prod:open-folder-real
   ```
 
 Run all desktop lanes:
 
 ```bash
-pnpm --filter @pi-gui/desktop run test:e2e:all
+pnpm --filter @pi-frame/desktop run test:e2e:all
 ```
 
 For mac-first CI, use:
 
 ```bash
-pnpm --filter @pi-gui/desktop run test:e2e:ci:mac
+pnpm --filter @pi-frame/desktop run test:e2e:ci:mac
 ```
 
-Linux CI currently validates packaging via:
+CI runs this complete core gate as four Playwright shards on isolated runners. Each
+shard still uses one worker so that a single Electron app owns its input loop.
+
+Linux CI validates packaging, runtime dependencies, and the existing unpacked executable via:
 
 ```bash
-pnpm --filter @pi-gui/desktop run package:linux
+pnpm --filter @pi-frame/desktop run package:linux
 pnpm --dir apps/desktop run verify:packaged-runtime-deps:linux
+pnpm --dir apps/desktop run test:prod:packaged-release:linux:ci
 ```
 
-Windows release CI validates packaging via:
+Windows release CI validates packaging, runtime dependencies, Computer Use, and the unpacked executable via:
 
 ```bash
-pnpm --filter @pi-gui/desktop run package:win:dir
+pnpm --filter @pi-frame/desktop run package:win:dir
 pnpm --dir apps/desktop run verify:packaged-runtime-deps:windows
+pnpm --dir apps/desktop run verify:packaged-computer-use:windows
+pnpm --dir apps/desktop run test:prod:packaged-release:windows:ci
+```
+
+The distributable Windows build is produced by `package:win` as separate `setup-x64.exe` and `portable-x64.exe` artifacts. System notifications are guaranteed for the NSIS setup build, whose Start menu shortcut registers the app identity used by Windows notifications. The portable build remains available but notification delivery is best effort because it does not install that shortcut. Run `test:prod:packaged-windows` to launch the unpacked executable and exercise startup plus integrated terminal; `test:prod:packaged-live:win` opts into the real-auth packaged Pi conversation check. After installing the setup artifact, run `test:prod:installed-windows-smoke` to exercise the executable targeted by the Start menu and desktop shortcuts with isolated test user data.
+
+For the Windows internal trial, an unpacked executable can be checked without installing it or touching the normal Pi user data. In PowerShell, point the production harness at the reviewed executable:
+
+```powershell
+$env:PI_APP_INSTALLED_EXE = "C:\absolute\path\to\win-unpacked\pi-frame.exe"
+$env:PI_APP_VERIFY_INSTALLED_SHORTCUTS = "0"
+pnpm --filter @pi-frame/desktop run test:prod:installed-windows-smoke
+
+$env:PI_APP_REAL_AUTH = "1"
+$env:PI_APP_REAL_AUTH_SOURCE_DIR = "C:\absolute\path\to\agent"
 ```
 
 ## Focus And Foreground Rules
@@ -138,45 +165,51 @@ Prefer the repo lanes first. They are deterministic, scriptable, and the right s
 
 Use manual Computer Use smoke only as a complement, not a replacement.
 
-- If the local Codex skill `$pi-gui-computer-use-smoke` is installed, use it for believable release-readiness sweeps on the installed app and for focus-hostile macOS surfaces that are awkward or disruptive in Playwright.
+- Use the deterministic Playwright lanes for release-readiness sweeps and native surfaces.
 - The reason to use Computer Use is product confidence, not determinism. It is useful when you want to see the real installed app behave correctly while minimizing disruption to the laptop.
 - Keep Playwright as the primary regression signal. Computer Use should not replace lane coverage for `core`, `live`, `native`, or `production`, and it should not become a hidden repo dependency.
 - Treat real open-folder and native file-picker checks in Computer Use as best-effort smoke coverage unless the workflow is explicitly being validated there.
 
 ## Targeted Commands
 
-Use a targeted script while iterating.
-Rerun the matching lane before closing for `core` and `live`.
-For `native`, rerun the targeted native spec by default and expand to `test:e2e:native` only when the change touches shared native helpers, multiple native specs, or lane-wide native behavior.
+Use a targeted script while iterating and as the default closing proof for a narrow change. These scripts build the current app and exercise the named behavior on the real Electron surface, so a passing targeted spec does not require an automatic full-lane rerun.
+
+Expand verification according to risk:
+
+- Run the directly affected spec(s) for a local feature or regression fix.
+- Add related specs and `tests/core/smoke.spec.ts` when startup, thread creation, or adjacent features could regress.
+- Run the complete owning lane after changes to Playwright/shared Electron test helpers, app bootstrap or preload, shared persistence/state schemas, cross-feature navigation, or multiple unrelated surfaces.
+- Keep complete lanes as CI and release gates.
+- For `native`, use the targeted native spec by default and expand only for shared native infrastructure or multiple native surfaces.
 
 ```bash
-pnpm --filter @pi-gui/desktop run test:core:worktrees
-pnpm --filter @pi-gui/desktop run test:core:persistence
-pnpm --filter @pi-gui/desktop run test:live:tool-calls
-pnpm --filter @pi-gui/desktop run test:native:paste
-pnpm --filter @pi-gui/desktop run test:native:open-folder
-pnpm --filter @pi-gui/desktop run test:native:attach-image
-pnpm --filter @pi-gui/desktop run test:prod:real-auth-contract
-pnpm --filter @pi-gui/desktop run test:prod:packaged-smoke
-pnpm --filter @pi-gui/desktop run test:prod:applications-relaunch
-pnpm --filter @pi-gui/desktop run test:prod:release-zip-smoke
-pnpm --filter @pi-gui/desktop run test:prod:open-folder-real
+pnpm --filter @pi-frame/desktop run test:core:worktrees
+pnpm --filter @pi-frame/desktop run test:core:persistence
+pnpm --filter @pi-frame/desktop run test:live:tool-calls
+pnpm --filter @pi-frame/desktop run test:native:paste
+pnpm --filter @pi-frame/desktop run test:native:open-folder
+pnpm --filter @pi-frame/desktop run test:native:attach-image
+pnpm --filter @pi-frame/desktop run test:prod:real-auth-contract
+pnpm --filter @pi-frame/desktop run test:prod:packaged-smoke
+pnpm --filter @pi-frame/desktop run test:prod:applications-relaunch
+pnpm --filter @pi-frame/desktop run test:prod:release-zip-smoke
+pnpm --filter @pi-frame/desktop run test:prod:open-folder-real
 ```
 
 For real-auth `live` specs, opt in explicitly:
 
 ```bash
 PI_APP_REAL_AUTH=1 PI_APP_REAL_AUTH_SOURCE_DIR=/absolute/path/to/agent \
-  pnpm --filter @pi-gui/desktop run test:e2e:runner -- apps/desktop/tests/live/submit-run.spec.ts
+  pnpm --filter @pi-frame/desktop run test:e2e:runner -- apps/desktop/tests/live/submit-run.spec.ts
 
 PI_APP_REAL_AUTH=1 PI_APP_REAL_AUTH_SOURCE_DIR=/absolute/path/to/agent \
-  pnpm --filter @pi-gui/desktop run test:e2e:runner -- apps/desktop/tests/live/tool-calls.spec.ts
+  pnpm --filter @pi-frame/desktop run test:e2e:runner -- apps/desktop/tests/live/tool-calls.spec.ts
 ```
 
 For dev-loop verification, use:
 
 ```bash
-pnpm --filter @pi-gui/desktop run test:dev:reload
+pnpm --filter @pi-frame/desktop run test:dev:reload
 ```
 
 That spec launches the app in development mode, edits isolated probe modules for renderer/Electron/shared-package wiring, and proves the running window picks up the changes.
@@ -190,16 +223,6 @@ That spec launches the app in development mode, edits isolated probe modules for
 - `pasteTinyPngViaClipboard()` uses Electron clipboard plus `webContents.paste()` and is appropriate for foreground/native coverage.
 - `tests/production/real-auth-contract.spec.ts` proves the default non-real-auth path still seeds a temporary fake-auth agent dir and keeps real-auth coverage opt-in.
 - `tests/production/packaged-smoke.spec.ts` proves the packaged `.app` bundle launches and can start a thread through the real UI.
-- `test:prod:packaged-computer-use-parity` builds once, verifies Computer Use failure shaping and timeline failure UI, packages the `.app` once, verifies the bundled Computer Use helper, extension, locked-use self-test, top-level @ extension surface, and packaged locked-readiness status, and then runs the real background Calculator/TextEdit cursor and focus probe with target-focus guarding while tolerating unrelated user focus changes. If the desktop is locked, it still runs the package-level checks and then stops before the background probe with `COMPUTER_USE_PARITY_GATE_BLOCKED`. Use this as the main Computer Use parity gate before claiming Codex-level behavior.
-- `test:prod:packaged-computer-use` packages the `.app` and verifies the bundled Computer Use helper, extension, locked-use self-test, and top-level @ extension surface.
-- `test:prod:packaged-computer-use-background` packages the `.app` and runs the real Computer Use helper against background Calculator and TextEdit flows without taking focus when macOS permissions allow it.
-- `test:prod:installed-computer-use-parity` builds current local artifacts, verifies `/Applications/pi-gui.app` carries the freshly built `out/**` payload, runtime workspace dependency payloads, and native Computer Use helper app payload, verifies Computer Use failure shaping and timeline UI, checks installed extension surfacing, helper background-safety capabilities, and locked-readiness status, then runs the installed background Calculator/TextEdit helper probe in preserve-frontmost mode when the desktop is unlocked. Preserve-frontmost mode skips the intentionally hazardous coordinate/physical fallback rejection probes so a stale helper cannot send fallback input into the user's active app, keeps helper-initiated physical mouse warps forbidden, and tolerates unrelated user pointer/focus changes while the active-user proof is running. If the desktop is locked it prints `COMPUTER_USE_INSTALLED_PARITY_GATE_SKIPPED installed-background-probe desktop=locked`; the gate later reruns the probe if the desktop becomes unlocked, or blocks with `COMPUTER_USE_INSTALLED_PARITY_GATE_BLOCKED` instead of passing by skipped live coverage. Full completion still requires locked-use active-turn wiring, explicit lock-screen E2E confirmation, and real-auth live composer coverage.
-- `test:prod:installed-computer-use-background` runs the same preserve-frontmost background Calculator/TextEdit helper probe against `/Applications/pi-gui.app`; use it after installing a new build to catch stale installed helpers before live UI testing without forcing Finder to the front. The default non-preserve background probe keeps the runtime coordinate/physical fallback rejection coverage on a controlled Finder baseline.
-- `test:prod:installed-computer-use-extension-surface` launches `/Applications/pi-gui.app` with isolated user data and verifies the installed app surfaces Computer Use as a top-level built-in extension in both Extensions and `@` mention flows, then clicks the Settings locked-use action through a non-mutating test hook to prove the installed UI would run the correct installer action.
-- `test:prod:installed-computer-use-locked-use-self-test` launches `/Applications/pi-gui.app` in test mode and verifies the installed helper can complete the trusted-desktop locked-use active-turn protocol through the installed desktop process.
-- `test:prod:installed-computer-use-live` launches `/Applications/pi-gui.app` with isolated test user data and real auth, sends a Computer Use prompt through the real composer, and fails if Calculator becomes frontmost, tool rows error, the run terminates generically, or the model uses `type_text` instead of Calculator clicks. It requires `PI_APP_REAL_AUTH=1` and `PI_APP_REAL_AUTH_SOURCE_DIR=/absolute/path/to/agent`, and the normal installed app should be idle/closed so Electron's single-instance lock does not route into a real user session.
-- `test:prod:installed-computer-use-locked-readiness` verifies `/Applications/pi-gui.app` is signed correctly and that Locked Computer Use is actually installed/enabled before claiming real locked-screen E2E coverage. Use the `:status` variant while diagnosing a locked or not-yet-enabled machine; it reports the same state without failing.
-- `test:prod:packaged-computer-use-locked-readiness:status` verifies the current packaged `.app` has the signed helper, authorization plug-in, installer, helper protocol, and status wiring without mutating macOS login authorization state.
 - `tests/production/applications-relaunch.spec.ts` proves an installed copy under `/Applications` launches and relaunches with persisted state.
 - `tests/production/release-zip-smoke.spec.ts` proves the packaged release ZIP can be extracted to a temp download-style path and launched through the real UI before publish.
 - `tests/production/open-folder-real.spec.ts` proves the real macOS open panel can add a workspace through the empty-state button.

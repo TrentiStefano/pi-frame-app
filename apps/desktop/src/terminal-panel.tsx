@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { Terminal } from "@xterm/xterm";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
@@ -8,6 +8,9 @@ import type { WorkspaceRecord } from "./desktop-state";
 import { CloseIcon, MaximizeIcon, MinimizeIcon, PlusIcon, RefreshIcon } from "./icons";
 import type { TerminalPanelSnapshot, TerminalSessionSnapshot, TerminalSize } from "./ipc";
 import { appendTerminalReplay } from "./terminal-model";
+import { shortcutMatches, type ShortcutBindings } from "./keyboard-shortcuts";
+import { useTranslation } from "react-i18next";
+import { recordTerminalData, recordTerminalWrite } from "./test-performance-diagnostics";
 
 const MIN_TERMINAL_HEIGHT = 220;
 const DEFAULT_TERMINAL_HEIGHT = 340;
@@ -17,6 +20,7 @@ interface TerminalPanelProps {
   readonly sessionId: string;
   readonly height: number;
   readonly isTakeover: boolean;
+  readonly shortcutBindings: ShortcutBindings;
   readonly onHeightChange: (height: number) => void;
   readonly onToggleTakeover: () => void;
   readonly onHide: () => void;
@@ -27,10 +31,12 @@ export function TerminalPanel({
   sessionId,
   height,
   isTakeover,
+  shortcutBindings,
   onHeightChange,
   onToggleTakeover,
   onHide,
 }: TerminalPanelProps) {
+  const { t } = useTranslation();
   const api = window.piApp;
   const panelRef = useRef<HTMLElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -82,6 +88,16 @@ export function TerminalPanel({
     setPanel(nextPanel);
   }, [api, sessionId, workspace.id]);
 
+  const handleTerminalPaste = useCallback((event: ClipboardEvent<HTMLDivElement>) => {
+    const terminalId = activeTerminalIdRef.current;
+    const text = event.clipboardData.getData("text");
+    if (!api || !terminalId || !text) {
+      return;
+    }
+    event.preventDefault();
+    void api.writeTerminal(terminalId, text);
+  }, [api]);
+
   const closeTerminal = useCallback(async (terminalId: string) => {
     if (!api) {
       return;
@@ -126,7 +142,7 @@ export function TerminalPanel({
       return undefined;
     }
     const markFocused = () => {
-      void api.setTerminalFocused(true);
+      void api.setTerminalFocused(true, activeTerminalIdRef.current);
     };
     const markBlurred = (event: FocusEvent) => {
       if (event.relatedTarget instanceof Node && panelElement.contains(event.relatedTarget)) {
@@ -134,26 +150,62 @@ export function TerminalPanel({
       }
       void api.setTerminalFocused(false);
     };
+    const handleShortcut = (event: KeyboardEvent) => {
+      if (!shortcutMatches(event, shortcutBindings.toggleTerminal, api.platform)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      onHide();
+    };
+    const handleWindowsPaste = (event: KeyboardEvent) => {
+      if (api.platform !== "win32" || !event.ctrlKey || event.shiftKey || event.key.toLowerCase() !== "v") {
+        return;
+      }
+      const terminalId = activeTerminalIdRef.current;
+      const text = terminalId ? api.readClipboardText() : "";
+      if (!terminalId || !text) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      void api.writeTerminal(terminalId, text);
+    };
     panelElement.addEventListener("focusin", markFocused);
     panelElement.addEventListener("focusout", markBlurred);
+    panelElement.addEventListener("keydown", handleShortcut, true);
+    panelElement.addEventListener("keydown", handleWindowsPaste, true);
     return () => {
       panelElement.removeEventListener("focusin", markFocused);
       panelElement.removeEventListener("focusout", markBlurred);
+      panelElement.removeEventListener("keydown", handleShortcut, true);
+      panelElement.removeEventListener("keydown", handleWindowsPaste, true);
       void api.setTerminalFocused(false);
     };
-  }, [api]);
+  }, [api, onHide, shortcutBindings.toggleTerminal]);
 
   useEffect(() => {
     if (!api) {
       return undefined;
     }
     const removeData = api.onTerminalData((event) => {
+      const receivedAt = window.__piAppTestMode ? performance.now() : 0;
+      if (window.__piAppTestMode) {
+        recordTerminalData(event.data.length);
+      }
       setPanel((currentPanel) => updateSession(currentPanel, event.terminalId, (session) => ({
         ...session,
         ...appendTerminalReplay(session.replay, event.data, session.truncated),
       })));
       if (event.terminalId === activeTerminalIdRef.current) {
-        terminalRef.current?.write(event.data);
+        const terminal = terminalRef.current;
+        if (terminal) {
+          const writeStartedAt = window.__piAppTestMode ? performance.now() : 0;
+          terminal.write(event.data);
+          if (window.__piAppTestMode) {
+            recordTerminalWrite(event.data.length, receivedAt, writeStartedAt, performance.now());
+          }
+        }
       }
     });
     const removeExit = api.onTerminalExit((event) => {
@@ -212,9 +264,7 @@ export function TerminalPanel({
       if (event.type !== "keydown") {
         return true;
       }
-      const commandModifier = api.platform === "darwin" ? event.metaKey : event.ctrlKey;
-      const key = event.key.toLowerCase();
-      if (commandModifier && !event.shiftKey && key === "t") {
+      if (shortcutMatches(event, shortcutBindings.newTerminalTab, api.platform)) {
         void createTerminal();
         return false;
       }
@@ -256,7 +306,7 @@ export function TerminalPanel({
       activeTerminalIdRef.current = "";
       terminal.dispose();
     };
-  }, [activeSession?.id, api, createTerminal, fitAndResize]);
+  }, [activeSession?.id, api, createTerminal, fitAndResize, shortcutBindings.newTerminalTab]);
 
   const startResize = (event: ReactMouseEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -291,11 +341,12 @@ export function TerminalPanel({
       className={`terminal-panel${isTakeover ? " terminal-panel--takeover" : ""}`}
       data-pi-terminal="true"
       data-testid="integrated-terminal"
+      onPasteCapture={handleTerminalPaste}
       style={isTakeover ? undefined : { height: `${height || DEFAULT_TERMINAL_HEIGHT}px` }}
     >
       <div className="terminal-panel__resize-handle" onMouseDown={startResize} />
       <div className="terminal-panel__toolbar">
-        <div className="terminal-panel__tabs" role="tablist" aria-label="Terminal sessions">
+        <div className="terminal-panel__tabs" role="tablist" aria-label={t("terminal.sessions")}>
           {(panel?.sessions ?? []).map((session) => (
             <div
               key={session.id}
@@ -315,7 +366,7 @@ export function TerminalPanel({
               <button
                 type="button"
                 className="terminal-panel__tab-close"
-                aria-label={`Close ${session.title}`}
+                aria-label={t("terminal.closeSession", { name: session.title })}
                 onClick={(event) => {
                   event.stopPropagation();
                   void closeTerminal(session.id);
@@ -327,22 +378,22 @@ export function TerminalPanel({
           ))}
         </div>
         <div className="terminal-panel__actions">
-          <button type="button" className="icon-button terminal-panel__action" title="New terminal" aria-label="New terminal" onClick={() => void createTerminal()}>
+          <button type="button" className="icon-button terminal-panel__action" title={t("terminal.new")} aria-label={t("terminal.new")} onClick={() => void createTerminal()}>
             <PlusIcon />
           </button>
-          <button type="button" className="icon-button terminal-panel__action" title="Restart terminal" aria-label="Restart terminal" onClick={() => void restartTerminal()}>
+          <button type="button" className="icon-button terminal-panel__action" title={t("terminal.restart")} aria-label={t("terminal.restart")} onClick={() => void restartTerminal()}>
             <RefreshIcon />
           </button>
           <button
             type="button"
             className="icon-button terminal-panel__action"
-            title={isTakeover ? "Restore terminal" : "Maximize terminal"}
-            aria-label={isTakeover ? "Restore terminal" : "Maximize terminal"}
+            title={isTakeover ? t("terminal.restore") : t("terminal.maximize")}
+            aria-label={isTakeover ? t("terminal.restore") : t("terminal.maximize")}
             onClick={onToggleTakeover}
           >
             {isTakeover ? <MinimizeIcon /> : <MaximizeIcon />}
           </button>
-          <button type="button" className="icon-button terminal-panel__action" title="Hide terminal" aria-label="Hide terminal" onClick={onHide}>
+          <button type="button" className="icon-button terminal-panel__action" title={t("terminal.hide")} aria-label={t("terminal.hide")} onClick={onHide}>
             <CloseIcon />
           </button>
         </div>

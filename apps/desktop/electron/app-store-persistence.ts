@@ -1,5 +1,7 @@
 import type {
+  AppLanguage,
   AppView,
+  CollaborationMode,
   ExtensionCommandCompatibilityRecord,
   ModelSettingsScopeMode,
   NotificationPreferences,
@@ -8,43 +10,52 @@ import type {
   OrchestrationChildTranscriptMessage,
   OrchestrationSupervisionLoop,
   ThemeMode,
-  ThemePresetId,
 } from "../src/desktop-state";
-import { isThemeMode, isThemePresetId } from "../src/desktop-state";
-import type { ModelSettingsSnapshot } from "@pi-gui/session-driver/runtime-types";
+import { isThemeMode } from "../src/desktop-state";
+import { isAppLanguage } from "../src/i18n/resources";
+import { normalizeShortcutBindings, type ShortcutBindings } from "../src/keyboard-shortcuts";
+import type { ModelSettingsSnapshot } from "@pi-frame/session-driver/runtime-types";
+import type { CustomTheme } from "../src/theme/types";
 import { readJsonWithBackup, writeFileAtomicQueued } from "./atomic-file-write";
 
 export interface PersistedUiState {
-  readonly version?: 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15;
+  readonly version?: 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19;
   readonly selectedWorkspaceId?: string;
   readonly selectedSessionId?: string;
   readonly activeView?: AppView;
   readonly composerDraft?: string;
   readonly composerDraftsBySession?: Record<string, string>;
+  readonly collaborationModeBySession?: Record<string, CollaborationMode>;
   readonly extensionCommandCompatibilityByWorkspace?: Record<string, readonly ExtensionCommandCompatibilityRecord[]>;
-  readonly notificationPreferences?: Partial<NotificationPreferences>;
+  readonly notificationPreferences?: NotificationPreferences;
+  readonly appLanguage?: AppLanguage;
   readonly integratedTerminalShell?: string;
+  readonly shortcutBindings?: ShortcutBindings;
   readonly lastViewedAtBySession?: Record<string, string>;
   readonly pinnedAtBySession?: Record<string, string>;
   readonly pinnedSessionOrder?: readonly string[];
   readonly workspaceOrder?: readonly string[];
+  readonly collapsedWorkspaceIds?: readonly string[];
   readonly modelSettingsScopeMode?: ModelSettingsScopeMode;
   readonly appGlobalModelSettings?: ModelSettingsSnapshot;
   readonly sidebarCollapsed?: boolean;
   readonly allowMultiple?: boolean;
-  readonly enableTransparency?: boolean;
+  readonly computerUseEnabled?: boolean;
   readonly themeMode?: ThemeMode;
-  readonly themePresetId?: ThemePresetId;
+  readonly themeId?: string;
+  readonly customThemes?: readonly CustomTheme[];
   readonly orchestrationChildren?: readonly OrchestrationChildThread[];
 }
 
 export interface LegacyPersistedUiState extends PersistedUiState {
+  readonly enableTransparency?: boolean;
+  readonly themePresetId?: unknown;
   readonly composerAttachmentsBySession?: Record<string, readonly unknown[]>;
   readonly transcripts?: Record<string, readonly unknown[]>;
 }
 
 export async function readPersistedUiState(uiStateFilePath: string): Promise<LegacyPersistedUiState> {
-  const result = await readJsonWithBackup<unknown>(uiStateFilePath);
+  const result = await readJsonWithBackup<LegacyPersistedUiState>(uiStateFilePath);
   if (result.corrupted) {
     // Surface corruption instead of silently returning `{}` (which the next
     // write would then persist over the last good state, losing pins, drafts,
@@ -56,41 +67,80 @@ export async function readPersistedUiState(uiStateFilePath: string): Promise<Leg
     );
   }
   const parsed = result.value;
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+  if (!parsed || typeof parsed !== "object") {
     return {};
   }
-  const candidate = parsed as Record<string, unknown>;
 
   return {
-      version: toPersistedVersion(candidate.version),
-      selectedWorkspaceId: stringValue(candidate.selectedWorkspaceId),
-      selectedSessionId: stringValue(candidate.selectedSessionId),
-      activeView: toAppView(candidate.activeView),
-      composerDraft: stringValue(candidate.composerDraft) ?? "",
-      composerDraftsBySession: toStringRecord(candidate.composerDraftsBySession),
-      extensionCommandCompatibilityByWorkspace: toPersistedCompatibilityByWorkspace(
-        candidate.extensionCommandCompatibilityByWorkspace,
-      ),
-      notificationPreferences: toNotificationPreferences(candidate.notificationPreferences),
+      version:
+        parsed.version === 19
+          ? 19
+          : parsed.version === 18
+          ? 18
+          : parsed.version === 17
+          ? 17
+          : parsed.version === 16
+          ? 16
+          : parsed.version === 15
+          ? 15
+          : parsed.version === 14
+          ? 14
+          : parsed.version === 13
+          ? 13
+          : parsed.version === 12
+          ? 12
+          : parsed.version === 11
+          ? 11
+          : parsed.version === 10
+          ? 10
+          : parsed.version === 9
+          ? 9
+          : parsed.version === 8
+            ? 8
+            : parsed.version === 7
+            ? 7
+            : parsed.version === 6
+              ? 6
+              : parsed.version === 5
+                ? 5
+                : parsed.version === 4
+                  ? 4
+                  : parsed.version === 3
+                    ? 3
+                    : parsed.version === 2
+                      ? 2
+                      : undefined,
+      selectedWorkspaceId: parsed.selectedWorkspaceId,
+      selectedSessionId: parsed.selectedSessionId,
+      activeView: parsed.activeView,
+      composerDraft: parsed.composerDraft ?? "",
+      composerDraftsBySession: parsed.composerDraftsBySession,
+      collaborationModeBySession: toCollaborationModeRecord(parsed.collaborationModeBySession),
+      extensionCommandCompatibilityByWorkspace: parsed.extensionCommandCompatibilityByWorkspace,
+      notificationPreferences: parsed.notificationPreferences,
+      appLanguage: isAppLanguage(parsed.appLanguage) ? parsed.appLanguage : undefined,
       integratedTerminalShell:
-        typeof candidate.integratedTerminalShell === "string" ? candidate.integratedTerminalShell : undefined,
-      lastViewedAtBySession: toStringRecord(candidate.lastViewedAtBySession),
-      pinnedAtBySession: toStringRecord(candidate.pinnedAtBySession),
-      pinnedSessionOrder: toStringArray(candidate.pinnedSessionOrder),
-      workspaceOrder: toStringArray(candidate.workspaceOrder),
+        typeof parsed.integratedTerminalShell === "string" ? parsed.integratedTerminalShell : undefined,
+      shortcutBindings: normalizeShortcutBindings(parsed.shortcutBindings),
+      lastViewedAtBySession: parsed.lastViewedAtBySession,
+      pinnedAtBySession: toStringRecord(parsed.pinnedAtBySession),
+      pinnedSessionOrder: toStringArray(parsed.pinnedSessionOrder),
+      workspaceOrder: Array.isArray(parsed.workspaceOrder) ? parsed.workspaceOrder : undefined,
+      collapsedWorkspaceIds: toStringArray(parsed.collapsedWorkspaceIds),
       modelSettingsScopeMode:
-        candidate.modelSettingsScopeMode === "per-repo" || candidate.modelSettingsScopeMode === "app-global"
-          ? candidate.modelSettingsScopeMode
+        parsed.modelSettingsScopeMode === "per-repo" || parsed.modelSettingsScopeMode === "app-global"
+          ? parsed.modelSettingsScopeMode
           : undefined,
-      appGlobalModelSettings: toPersistedModelSettingsSnapshot(candidate.appGlobalModelSettings),
-      sidebarCollapsed: typeof candidate.sidebarCollapsed === "boolean" ? candidate.sidebarCollapsed : undefined,
-      allowMultiple: typeof candidate.allowMultiple === "boolean" ? candidate.allowMultiple : undefined,
-      enableTransparency: typeof candidate.enableTransparency === "boolean" ? candidate.enableTransparency : undefined,
-      themeMode: toThemeMode(candidate.themeMode),
-      themePresetId: toThemePresetId(candidate.themePresetId),
-      orchestrationChildren: toPersistedOrchestrationChildren(candidate.orchestrationChildren),
-      composerAttachmentsBySession: toObjectArrayRecord(candidate.composerAttachmentsBySession),
-      transcripts: toObjectArrayRecord(candidate.transcripts),
+      appGlobalModelSettings: toPersistedModelSettingsSnapshot(parsed.appGlobalModelSettings),
+      sidebarCollapsed: typeof parsed.sidebarCollapsed === "boolean" ? parsed.sidebarCollapsed : undefined,
+      allowMultiple: typeof parsed.allowMultiple === "boolean" ? parsed.allowMultiple : undefined,
+      computerUseEnabled: typeof parsed.computerUseEnabled === "boolean" ? parsed.computerUseEnabled : undefined,
+      themeMode: toThemeMode(parsed.themeMode),
+      themeId: typeof parsed.themeId === "string" ? parsed.themeId : undefined,
+      customThemes: Array.isArray(parsed.customThemes) ? (parsed.customThemes as CustomTheme[]) : undefined,
+      orchestrationChildren: toPersistedOrchestrationChildren(parsed.orchestrationChildren),
+      composerAttachmentsBySession: parsed.composerAttachmentsBySession,
+      transcripts: parsed.transcripts,
     };
 }
 
@@ -101,7 +151,7 @@ export async function writePersistedUiState(
   const serialized = `${JSON.stringify(
     {
       ...payload,
-      version: 15,
+      version: 19,
     } satisfies PersistedUiState,
     null,
     2,
@@ -109,28 +159,19 @@ export async function writePersistedUiState(
   await writeFileAtomicQueued(uiStateFilePath, serialized);
 }
 
+function toCollaborationModeRecord(value: unknown): Record<string, CollaborationMode> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  return Object.fromEntries(
+    Object.entries(value).filter((entry): entry is [string, CollaborationMode] =>
+      entry[1] === "default" || entry[1] === "plan",
+    ),
+  );
+}
+
 function toThemeMode(value: unknown): ThemeMode | undefined {
   return isThemeMode(value) ? value : undefined;
-}
-
-function toThemePresetId(value: unknown): ThemePresetId | undefined {
-  return isThemePresetId(value) ? value : undefined;
-}
-
-function toAppView(value: unknown): AppView | undefined {
-  return value === "threads" ||
-    value === "new-thread" ||
-    value === "skills" ||
-    value === "extensions" ||
-    value === "settings"
-    ? value
-    : undefined;
-}
-
-function toPersistedVersion(value: unknown): NonNullable<PersistedUiState["version"]> | undefined {
-  return typeof value === "number" && Number.isInteger(value) && value >= 2 && value <= 15
-    ? value as NonNullable<PersistedUiState["version"]>
-    : undefined;
 }
 
 function toStringArray(value: unknown): string[] | undefined {
@@ -356,96 +397,14 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-function toNotificationPreferences(value: unknown): Partial<NotificationPreferences> | undefined {
-  const candidate = objectRecord(value);
-  if (!candidate) {
-    return undefined;
-  }
-  const preferences = {
-    ...(typeof candidate.backgroundCompletion === "boolean"
-      ? { backgroundCompletion: candidate.backgroundCompletion }
-      : {}),
-    ...(typeof candidate.backgroundFailure === "boolean" ? { backgroundFailure: candidate.backgroundFailure } : {}),
-    ...(typeof candidate.attentionNeeded === "boolean" ? { attentionNeeded: candidate.attentionNeeded } : {}),
-  };
-  return Object.keys(preferences).length > 0 ? preferences : undefined;
-}
-
 function toStringRecord(value: unknown): Record<string, string> | undefined {
-  const candidate = objectRecord(value);
-  if (!candidate) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
   }
 
-  const entries = Object.entries(candidate)
+  const entries = Object.entries(value as Record<string, unknown>)
     .filter((entry): entry is [string, string] => Boolean(entry[0]) && typeof entry[1] === "string" && Boolean(entry[1]));
   return entries.length > 0 ? Object.fromEntries(entries) : undefined;
-}
-
-function toPersistedCompatibilityByWorkspace(
-  value: unknown,
-): Record<string, readonly ExtensionCommandCompatibilityRecord[]> | undefined {
-  const candidate = objectRecord(value);
-  if (!candidate) {
-    return undefined;
-  }
-
-  const entries = Object.entries(candidate).flatMap(([workspaceId, records]) => {
-    if (!workspaceId || !Array.isArray(records)) {
-      return [];
-    }
-    const validRecords = records.flatMap((record) => {
-      const parsed = toPersistedCompatibilityRecord(record);
-      return parsed ? [parsed] : [];
-    });
-    return validRecords.length > 0 ? [[workspaceId, validRecords] as const] : [];
-  });
-  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
-}
-
-function toPersistedCompatibilityRecord(value: unknown): ExtensionCommandCompatibilityRecord | undefined {
-  const candidate = objectRecord(value);
-  if (
-    !candidate ||
-    typeof candidate.commandName !== "string" ||
-    typeof candidate.extensionPath !== "string" ||
-    (candidate.status !== "supported" && candidate.status !== "terminal-only") ||
-    typeof candidate.message !== "string" ||
-    typeof candidate.capability !== "string" ||
-    typeof candidate.updatedAt !== "string"
-  ) {
-    return undefined;
-  }
-  return {
-    commandName: candidate.commandName,
-    extensionPath: candidate.extensionPath,
-    status: candidate.status,
-    message: candidate.message,
-    capability: candidate.capability,
-    updatedAt: candidate.updatedAt,
-  };
-}
-
-function toObjectArrayRecord(value: unknown): Record<string, readonly unknown[]> | undefined {
-  const candidate = objectRecord(value);
-  if (!candidate) {
-    return undefined;
-  }
-
-  const entries = Object.entries(candidate).flatMap(([key, values]) => {
-    if (!key || !Array.isArray(values)) {
-      return [];
-    }
-    const objectValues = values.filter((entry) => Boolean(objectRecord(entry)));
-    return objectValues.length > 0 ? [[key, objectValues] as const] : [];
-  });
-  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
-}
-
-function objectRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
 }
 
 function toOrchestrationStatus(value: unknown): OrchestrationChildThread["status"] {
@@ -459,10 +418,10 @@ function toOptionalOrchestrationStatus(value: unknown): OrchestrationChildThread
 }
 
 function toPersistedModelSettingsSnapshot(value: unknown): ModelSettingsSnapshot | undefined {
-  const candidate = objectRecord(value);
-  if (!candidate) {
+  if (!value || typeof value !== "object") {
     return undefined;
   }
+  const candidate = value as Record<string, unknown>;
   const enabledModelPatterns = Array.isArray(candidate.enabledModelPatterns)
     ? candidate.enabledModelPatterns.filter((entry): entry is string => typeof entry === "string")
     : [];

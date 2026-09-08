@@ -19,7 +19,7 @@ async function captureProof(window: Page, filename: string): Promise<void> {
   await window.screenshot({ path: join(proofDir, filename) });
 }
 
-test("thread menu supports rename, archive/restore, mark read, copy id, and right click", async () => {
+test("thread menu supports rename, mark read, copy id, and right click", async () => {
   test.setTimeout(90_000);
   const userDataDir = await makeUserDataDir();
   const workspacePath = await makeWorkspace("thread-menu-workspace");
@@ -66,13 +66,14 @@ test("thread menu supports rename, archive/restore, mark read, copy id, and righ
   const harness = await launchDesktop(userDataDir, { testMode: "background" });
   try {
     const window = await harness.firstWindow();
+    await window.context().grantPermissions(["clipboard-read", "clipboard-write"]);
     let row = window.locator(".session-row", { hasText: targetTitle }).first();
     await expect(row).toHaveAttribute("data-sidebar-indicator", "unseen");
 
     await row.click({ button: "right" });
     const menu = row.getByRole("menu");
     await expect(menu.getByRole("button", { name: "Rename thread" })).toBeVisible();
-    await expect(menu.getByRole("button", { name: "Archive" })).toBeVisible();
+    await expect(menu.getByRole("button", { name: "Archive" })).toHaveCount(0);
     await expect(menu.getByRole("button", { name: "Mark as read" })).toBeVisible();
     await expect(menu.getByRole("button", { name: "Copy session id" })).toBeVisible();
     await captureProof(window, "01-open-menu.png");
@@ -97,10 +98,26 @@ test("thread menu supports rename, archive/restore, mark read, copy id, and righ
     const trailingBox = await row.locator(".session-row__trailing").boundingBox();
     const rowBox = await row.boundingBox();
     const clusterBox = await row.locator(".session-row__action-cluster").boundingBox();
+    const pinButtonBox = await row.locator(".session-row__pin-action").boundingBox();
+    const pinIconBox = await row.locator(".session-row__pin-action svg").boundingBox();
+    const menuButtonBox = await row.locator(".session-row__menu-button").boundingBox();
+    const menuIconBox = await row.locator(".session-row__menu-button svg").boundingBox();
     expect(selectBox).not.toBeNull();
     expect(trailingBox).not.toBeNull();
     expect(rowBox).not.toBeNull();
     expect(clusterBox).not.toBeNull();
+    expect(pinButtonBox).not.toBeNull();
+    expect(pinIconBox).not.toBeNull();
+    expect(menuButtonBox).not.toBeNull();
+    expect(menuIconBox).not.toBeNull();
+    expect(pinButtonBox!.width).toBe(28);
+    expect(pinButtonBox!.height).toBe(28);
+    expect(menuButtonBox!.width).toBe(28);
+    expect(menuButtonBox!.height).toBe(28);
+    expect(Math.abs(pinIconBox!.x + pinIconBox!.width / 2 - (pinButtonBox!.x + pinButtonBox!.width / 2))).toBeLessThan(0.5);
+    expect(Math.abs(pinIconBox!.y + pinIconBox!.height / 2 - (pinButtonBox!.y + pinButtonBox!.height / 2))).toBeLessThan(0.5);
+    expect(Math.abs(menuIconBox!.x + menuIconBox!.width / 2 - (menuButtonBox!.x + menuButtonBox!.width / 2))).toBeLessThan(0.5);
+    expect(Math.abs(menuIconBox!.y + menuIconBox!.height / 2 - (menuButtonBox!.y + menuButtonBox!.height / 2))).toBeLessThan(0.5);
     expect(trailingBox!.width).toBeGreaterThanOrEqual(clusterBox!.width);
     const gapStart = selectBox!.x + selectBox!.width;
     const gapWidth = trailingBox!.x - gapStart;
@@ -126,18 +143,6 @@ test("thread menu supports rename, archive/restore, mark read, copy id, and righ
     await expect(row).toBeVisible();
     await captureProof(window, "03-renamed.png");
 
-    await row.hover();
-    await row.locator(".session-row__menu-button").click();
-    await row.getByRole("menu").getByRole("button", { name: "Archive" }).click();
-    await expect(window.locator(".session-list > .session-row", { hasText: renamedTitle })).toHaveCount(0);
-    const archivedToggle = window.locator(".archived-thread-group__toggle");
-    await expect(archivedToggle).toBeVisible();
-    await captureProof(window, "04-archived.png");
-
-    await archivedToggle.click();
-    const archivedRow = window.locator(".session-list--archived .session-row", { hasText: renamedTitle });
-    await archivedRow.click({ button: "right" });
-    await archivedRow.getByRole("menu").getByRole("button", { name: "Restore" }).click();
     await expect(window.locator(".session-list > .session-row", { hasText: renamedTitle })).toHaveCount(1);
   } finally {
     await harness.close();

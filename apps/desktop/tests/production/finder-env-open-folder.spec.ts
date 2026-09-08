@@ -18,7 +18,7 @@ test.skip(process.platform !== "darwin", "Finder-style packaged app coverage is 
 test("launches a packaged app under a Finder-style PATH and opens the first folder", async () => {
   test.setTimeout(120_000);
 
-  const userDataDir = await makeUserDataDir("pi-gui-finder-env-user-data-");
+  const userDataDir = await makeUserDataDir("pi-frame-finder-env-user-data-");
   const agentDir = join(userDataDir, "agent");
   await mkdir(agentDir, { recursive: true });
   await writeFile(
@@ -44,7 +44,7 @@ test("launches a packaged app under a Finder-style PATH and opens the first fold
 
   const workspacePath = await makeWorkspace("finder-env-open-folder-workspace");
   const extractedAppBundle = await extractPackagedReleaseZipAppBundle();
-  const installedAppBundle = join("/Applications", `pi-gui finder env ${Date.now()}.app`);
+  const installedAppBundle = join("/Applications", `pi-frame finder env ${Date.now()}.app`);
   await copyAppBundle(extractedAppBundle, installedAppBundle);
   const executablePath = await resolveAppBundleExecutable(installedAppBundle);
 

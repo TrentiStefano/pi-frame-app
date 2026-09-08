@@ -1,8 +1,9 @@
-import type { SessionConfig } from "@pi-gui/session-driver";
-import { createEmptyExtensionUiState as createBaseExtensionUiState, type ExtensionUiState } from "@pi-gui/pi-sdk-driver";
-import type { RuntimeCommandRecord } from "@pi-gui/session-driver/runtime-types";
+import type { SessionConfig } from "@pi-frame/session-driver";
+import { createEmptyExtensionUiState as createBaseExtensionUiState, type ExtensionUiState } from "@pi-frame/pi-sdk-driver";
+import type { RuntimeCommandRecord } from "@pi-frame/session-driver/runtime-types";
 import type {
   ComposerAttachment,
+  CollaborationMode,
   QueuedComposerMessage,
   SessionExtensionDialogRecord,
   SessionExtensionUiStateRecord,
@@ -17,6 +18,7 @@ export interface MutableSessionExtensionUiState extends ExtensionUiState {
 export interface PendingAutoTitle {
   readonly requestToken: string;
   readonly cancel: () => void;
+  projectedTitle?: string;
 }
 
 export interface QueuedComposerEditState {
@@ -38,6 +40,7 @@ export class SessionStateMap {
   readonly queuedComposerMessagesBySession = new Map<string, QueuedComposerMessage[]>();
   readonly queuedComposerEditsBySession = new Map<string, QueuedComposerEditState>();
   readonly sessionConfigBySession = new Map<string, SessionConfig>();
+  readonly collaborationModeBySession = new Map<string, CollaborationMode>();
   readonly lastViewedAtBySession = new Map<string, string>();
   readonly pinnedAtBySession = new Map<string, string>();
   pinnedSessionOrder: string[] = [];
@@ -81,6 +84,7 @@ export class SessionStateMap {
       this.queuedComposerMessagesBySession,
       this.queuedComposerEditsBySession,
       this.sessionConfigBySession,
+      this.collaborationModeBySession,
       this.lastViewedAtBySession,
       this.pinnedAtBySession,
       this.sessionErrorsBySession,
@@ -110,7 +114,7 @@ export class SessionStateMap {
   /** Remove persisted UI entries for sessions that are no longer in the catalog. */
   prunePersistedUiState(activeKeys: Set<string>): boolean {
     let changed = false;
-    for (const map of [this.composerDraftsBySession, this.lastViewedAtBySession, this.pinnedAtBySession]) {
+    for (const map of [this.composerDraftsBySession, this.lastViewedAtBySession, this.pinnedAtBySession, this.collaborationModeBySession]) {
       for (const key of map.keys()) {
         if (!activeKeys.has(key)) {
           map.delete(key);
@@ -139,6 +143,7 @@ export class SessionStateMap {
     this.queuedComposerMessagesBySession.delete(key);
     this.queuedComposerEditsBySession.delete(key);
     this.sessionConfigBySession.delete(key);
+    this.collaborationModeBySession.delete(key);
     this.lastViewedAtBySession.delete(key);
     this.pinnedAtBySession.delete(key);
     this.pinnedSessionOrder = this.pinnedSessionOrder.filter((entry) => entry !== key);

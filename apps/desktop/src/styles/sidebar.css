@@ -1,28 +1,54 @@
 .shell {
   --sidebar-width: 292px;
-  --titlebar-toggle-left: 86px;
+  --effective-sidebar-width: var(--sidebar-width);
   --titlebar-toggle-size: 30px;
-  --titlebar-toggle-main-gap: 16px;
-  --titlebar-collapsed-main-padding-left: calc(
-    var(--titlebar-toggle-left) + var(--titlebar-toggle-size) + var(--titlebar-toggle-main-gap)
-  );
   width: 100%;
   height: 100%;
   display: grid;
-  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  grid-template-columns: var(--effective-sidebar-width) minmax(0, 1fr);
   gap: 0;
   padding: 0;
   position: relative;
   background: var(--window);
+  transition: grid-template-columns var(--motion-slow) cubic-bezier(0.25, 1, 0.5, 1);
 }
 
 .shell--loading {
   grid-template-columns: 1fr;
   place-items: center;
 }
+.shell--enter > .sidebar,
+.shell--enter > .main {
+  animation: app-shell-enter 360ms cubic-bezier(0.25, 1, 0.5, 1) both;
+}
+
+.shell--enter > .main {
+  animation-delay: 45ms;
+}
+
+@keyframes app-shell-enter {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-screen,
+  .shell--enter > .sidebar,
+  .shell--enter > .main {
+    animation: none;
+  }
+
+  .loading-screen__spinner {
+    animation-duration: 1.6s;
+  }
+}
 
 .shell--sidebar-collapsed {
-  grid-template-columns: minmax(0, 1fr);
+  --effective-sidebar-width: 0px;
+}
+
+.shell--sidebar-resizing {
+  transition: none;
 }
 
 .sidebar,
@@ -31,15 +57,30 @@
 }
 
 .sidebar {
+  min-width: 0;
+  width: 100%;
   display: grid;
   grid-template-rows: auto 1fr auto;
   overflow: hidden;
   background: var(--sidebar);
   border-right: 1px solid var(--line);
+  opacity: 1;
+  transform: translateX(0);
+  transform-origin: left center;
+  transition:
+    opacity var(--motion-fast) var(--ease-out),
+    transform var(--motion-slow) cubic-bezier(0.25, 1, 0.5, 1);
 }
 
-.enable-transparency .sidebar {
-  backdrop-filter: var(--glass-blur) var(--glass-saturation);
+.sidebar > * {
+  width: var(--sidebar-width);
+}
+
+.shell--sidebar-collapsed > .sidebar {
+  pointer-events: none;
+  opacity: 0;
+  transform: translateX(-10px);
+  border-right-color: transparent;
 }
 
 .sidebar__top,
@@ -54,8 +95,43 @@
 
 .sidebar__nav {
   display: grid;
-  gap: 2px;
+  gap: var(--space-1);
   margin-top: 8px;
+}
+
+.sidebar-resizer {
+  position: absolute;
+  top: var(--windows-titlebar-height, 0);
+  bottom: 0;
+  left: calc(var(--effective-sidebar-width) - 4px);
+  z-index: 45;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shell,
+  .sidebar {
+    transition: none;
+  }
+}
+
+.sidebar-resizer::after {
+  position: absolute;
+  inset: 0 3px;
+  content: "";
+  background: transparent;
+  transition: background-color var(--motion-fast) var(--ease-out);
+}
+
+.sidebar-resizer:hover::after,
+.sidebar-resizer:focus-visible::after {
+  background: var(--accent-tint-border);
+}
+
+.sidebar-resizer:focus-visible {
+  outline: none;
 }
 
 .sidebar__nav-item {
@@ -70,6 +146,10 @@
   font-size: 13px;
   font-weight: 560;
   border: 1px solid transparent;
+  transition:
+    background var(--motion-base) var(--ease-out),
+    border-color var(--motion-base) var(--ease-out),
+    color var(--motion-base) var(--ease-out);
 }
 
 .sidebar__nav-item svg {
@@ -82,6 +162,39 @@
   border-color: var(--theme-selection-border, var(--line));
   color: var(--theme-selection-ink, var(--text-strong));
 }
+
+.sidebar__nav-item:hover:not(:disabled) {
+  background: var(--theme-control-hover-bg, var(--overlay-hover));
+  border-color: var(--theme-control-border, var(--border-heavy));
+  color: var(--text-strong);
+}
+
+.sidebar__nav-item:focus-visible,
+.sidebar__new:focus-visible,
+.sidebar__search:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.sidebar__search {
+  margin-top: 8px;
+  min-height: 32px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--muted-strong);
+}
+
+.sidebar__search > svg { width: 14px; height: 14px; }
+.sidebar__search input { min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text-strong); font-size: 12px; }
+.sidebar__search button { width: 22px; height: 22px; display: grid; place-items: center; color: var(--muted-strong); }
+.sidebar__search button svg { width: 13px; height: 13px; }
+.sidebar__footer { border-top: 1px solid var(--line); }
 
 .sidebar__new {
   -webkit-app-region: no-drag;
@@ -98,6 +211,15 @@
   align-items: center;
   justify-content: flex-start;
   gap: 8px;
+  transition:
+    background var(--motion-base) var(--ease-out),
+    border-color var(--motion-base) var(--ease-out),
+    color var(--motion-base) var(--ease-out);
+}
+
+.sidebar__new:hover:not(:disabled) {
+  background: var(--theme-control-hover-bg, var(--overlay-hover));
+  border-color: var(--theme-control-border, var(--border-heavy));
 }
 
 .sidebar__new:disabled,
@@ -632,7 +754,7 @@
 .session-row:hover .session-row__trailing,
 .session-row:focus-within .session-row__trailing,
 .session-row--pinned .session-row__trailing {
-  min-width: 74px;
+  min-width: 58px;
 }
 
 .session-row__trailing:has(.session-row__workspace-icon) {
@@ -686,12 +808,12 @@
 }
 
 .session-row .session-row__action {
-  width: auto;
-  height: auto;
+  width: 28px;
+  height: 28px;
   display: inline-flex;
   align-items: center;
-  padding: 6px;
-  padding-right: 0;
+  justify-content: center;
+  padding: 0;
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
@@ -709,9 +831,6 @@
 }
 
 .session-row .session-row__menu-button {
-  min-width: 20px;
-  padding-left: 6px;
-  font-size: 18px;
   line-height: 1;
 }
 
@@ -757,55 +876,6 @@
   color: var(--text-strong);
 }
 
-.archived-thread-group {
-  padding-left: 24px;
-  display: grid;
-  gap: 4px;
-}
-
-.archived-thread-group__toggle {
-  min-height: 28px;
-  padding: 2px 8px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  width: fit-content;
-  border-radius: var(--radius-pill);
-  color: var(--muted-soft);
-  font-size: 11px;
-  font-weight: 620;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.archived-thread-group__toggle:hover {
-  background: var(--overlay-hover);
-}
-
-.archived-thread-group__chevron {
-  width: 14px;
-  height: 14px;
-  display: grid;
-  place-items: center;
-  transition: transform var(--motion-base) var(--ease-out);
-}
-
-.archived-thread-group__chevron--open {
-  transform: rotate(0deg);
-}
-
-.archived-thread-group__toggle:not([aria-expanded="true"]) .archived-thread-group__chevron {
-  transform: rotate(-90deg);
-}
-
-.archived-thread-group__count {
-  color: var(--muted-subtle);
-}
-
-.session-list--archived {
-  padding-left: 0;
-}
-
 .sidebar__footer {
   border-top: 1px solid var(--line);
   background: var(--surface-overlay-muted);
@@ -829,11 +899,9 @@
 }
 
 @media (max-width: 1180px) {
-  /* Scope to the expanded shell: `.shell--sidebar-collapsed` has the same
-     specificity as `.shell`, so an unscoped rule here would win by source
-     order and pin `.main` to a 272px column when the sidebar is collapsed. */
+  /* Keep the resized sidebar proportional without affecting the collapsed shell. */
   .shell:not(.shell--sidebar-collapsed) {
-    grid-template-columns: 272px minmax(0, 1fr);
+    --effective-sidebar-width: min(var(--sidebar-width), 36vw);
   }
 }
 
@@ -845,6 +913,10 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .sidebar-resizer {
+    display: none;
+  }
+
   .shell:not(.shell--sidebar-collapsed) > .sidebar {
     position: absolute;
     top: 0;
@@ -854,9 +926,4 @@
     z-index: 40;
     box-shadow: var(--shadow-xl);
   }
-}
-
-/* Transparency mode re-enables the sidebar backdrop blur in dark. */
-.enable-transparency.dark .sidebar {
-  backdrop-filter: var(--glass-blur) var(--glass-saturation);
 }

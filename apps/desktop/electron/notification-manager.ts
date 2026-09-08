@@ -4,10 +4,11 @@ import { dirname } from "node:path";
 import type { DesktopAppStore } from "./app-store";
 import type { NotificationPermissionService } from "./notification-permission";
 import type { DesktopAppState } from "../src/desktop-state";
-import { sessionKey } from "@pi-gui/pi-sdk-driver";
-import type { SessionDriverEvent, SessionRef } from "@pi-gui/session-driver";
+import { sessionKey } from "@pi-frame/pi-sdk-driver";
+import type { SessionDriverEvent, SessionRef } from "@pi-frame/session-driver";
 import { getSelectedSession } from "../src/desktop-state";
 import { isSessionActivelyViewed } from "./session-visibility";
+import { mainT } from "./i18n";
 
 const MAX_COMPLETED_RUN_KEYS = 500;
 
@@ -133,7 +134,7 @@ export class NotificationManager {
         }
         this.completedRunKeys.delete(oldest);
       }
-      await this.showNotification(event.sessionRef, event.snapshot.title, "Agent finished responding");
+      await this.showNotification(event.sessionRef, event.snapshot.title, mainT("notification.finished"));
       return;
     }
 
@@ -349,7 +350,7 @@ export class NotificationManager {
   }
 
   private titleForSession(sessionRef: SessionRef): string {
-    return this.sessionFromLatestState(sessionRef)?.title ?? "pi session";
+    return this.sessionFromLatestState(sessionRef)?.title ?? mainT("notification.fallbackSession");
   }
 }
 
@@ -361,7 +362,7 @@ function hostUiBody(event: Extract<SessionDriverEvent, { type: "hostUiRequest" }
   if (event.request.kind === "confirm" || event.request.kind === "input" || event.request.kind === "select") {
     return event.request.title;
   }
-  return "Needs your input";
+  return mainT("notification.needsInput");
 }
 
 function sameSessionRef(left: SessionRef | undefined, right: SessionRef | undefined): boolean {

@@ -1,4 +1,4 @@
-declare module "@pi-gui/session-driver" {
+declare module "@pi-frame/session-driver" {
   export type WorkspaceId = string;
   export type SessionId = string;
   export type RunId = string;
@@ -66,7 +66,35 @@ declare module "@pi-gui/session-driver" {
     readonly sizeBytes?: number;
   }
 
-  export type SessionAttachment = SessionImageAttachment | SessionFileAttachment;
+  export interface SessionBrowserElementAttachment {
+    readonly kind: "browser-element";
+    readonly id: string;
+    readonly name: string;
+    readonly tabId: string;
+    readonly capturedAt: Timestamp;
+    readonly page: {
+      readonly url: string;
+      readonly title: string;
+      readonly revision: number;
+    };
+    readonly frameUrl: string;
+    readonly element: {
+      readonly tag: string;
+      readonly role?: string;
+      readonly accessibleName?: string;
+      readonly text?: string;
+      readonly attributes: Readonly<Record<string, string>>;
+      readonly locator: {
+        readonly kind: "role" | "test-id" | "label" | "text" | "id" | "css";
+        readonly value: string;
+        readonly unique: boolean;
+      };
+      readonly cssFallback?: string;
+      readonly ancestors: readonly { readonly tag: string; readonly role?: string; readonly name?: string }[];
+    };
+  }
+
+  export type SessionAttachment = SessionImageAttachment | SessionFileAttachment | SessionBrowserElementAttachment;
 
   export interface SessionConfig {
     readonly provider?: string;
@@ -160,6 +188,7 @@ declare module "@pi-gui/session-driver" {
     readonly callId: string;
     readonly text?: string;
     readonly progress?: number;
+    readonly details?: unknown;
   }
 
   export interface ToolFinishedEvent extends SessionEventBase {
@@ -309,6 +338,20 @@ declare module "@pi-gui/session-driver" {
     readonly diagnostics: readonly RuntimeExtensionDiagnostic[];
   }
 
+  export interface RuntimePackageUpdate {
+    readonly source: string;
+    readonly displayName: string;
+    readonly type: "npm" | "git";
+    readonly scope: Exclude<RuntimeSourceScope, "temporary">;
+  }
+
+  export interface RuntimeConfiguredPackage {
+    readonly source: string;
+    readonly scope: "user" | "project";
+    readonly filtered: boolean;
+    readonly installed: boolean;
+  }
+
   export interface RuntimeCommandRecord {
     readonly name: string;
     readonly description?: string;
@@ -323,6 +366,7 @@ declare module "@pi-gui/session-driver" {
     openSession(sessionRef: SessionRef): Promise<SessionSnapshot>;
     archiveSession(sessionRef: SessionRef): Promise<void>;
     unarchiveSession(sessionRef: SessionRef): Promise<void>;
+    deleteSession(sessionRef: SessionRef): Promise<void>;
     sendUserMessage(sessionRef: SessionRef, input: SessionMessageInput): Promise<void>;
     replaceQueuedMessages(sessionRef: SessionRef, messages: readonly SessionQueuedMessage[]): Promise<void>;
     cancelCurrentRun(sessionRef: SessionRef): Promise<void>;
@@ -338,14 +382,16 @@ declare module "@pi-gui/session-driver" {
   }
 }
 
-declare module "@pi-gui/session-driver/runtime-types" {
-  import type { WorkspaceRef } from "@pi-gui/session-driver";
+declare module "@pi-frame/session-driver/runtime-types" {
+  import type { WorkspaceRef } from "@pi-frame/session-driver";
 
   export type RuntimeAuthType = "oauth" | "api_key" | "none";
   export type RuntimeProviderAuthSource = "none" | "oauth" | "auth_file" | "env" | "external";
   export type RuntimeSourceScope = "user" | "project" | "temporary";
   export type RuntimeSourceOrigin = "package" | "top-level";
   export type RuntimeCommandSource = "extension" | "prompt" | "skill";
+  export type RuntimePackageUpdate = import("@pi-frame/session-driver").RuntimePackageUpdate;
+  export type RuntimeConfiguredPackage = import("@pi-frame/session-driver").RuntimeConfiguredPackage;
 
   export interface RuntimeSourceInfo {
     readonly path: string;
@@ -452,6 +498,11 @@ declare module "@pi-gui/session-driver/runtime-types" {
   export interface RuntimeResourceDriver {
     getRuntimeSnapshot(workspace: WorkspaceRef): Promise<RuntimeSnapshot>;
     refreshRuntime(workspace: WorkspaceRef): Promise<RuntimeSnapshot>;
+    checkForExtensionUpdates(workspace: WorkspaceRef): Promise<readonly RuntimePackageUpdate[]>;
+    updateExtensions(workspace: WorkspaceRef, sources?: readonly string[]): Promise<RuntimeSnapshot>;
+    listPackages(workspace: WorkspaceRef): Promise<readonly RuntimeConfiguredPackage[]>;
+    installPackage(workspace: WorkspaceRef, source: string, scope: "user" | "project"): Promise<RuntimeSnapshot>;
+    removePackage(workspace: WorkspaceRef, source: string, scope: "user" | "project"): Promise<RuntimeSnapshot>;
     login(workspace: WorkspaceRef, providerId: string, callbacks: RuntimeLoginCallbacks): Promise<RuntimeSnapshot>;
     logout(workspace: WorkspaceRef, providerId: string): Promise<RuntimeSnapshot>;
     setProviderApiKey(workspace: WorkspaceRef, providerId: string, apiKey: string): Promise<RuntimeSnapshot>;

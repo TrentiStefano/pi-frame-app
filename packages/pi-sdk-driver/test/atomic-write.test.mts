@@ -33,16 +33,27 @@ test("leaves only the target file behind, no lingering temp files", async () => 
   });
 });
 
-test("concurrent writes never collide or leave a partial file; result is one of the inputs", async () => {
+test("repeated replacement writes stay readable on Windows", { skip: process.platform !== "win32" }, async () => {
+  await withTempDir(async (dir) => {
+    const target = join(dir, "catalog.json");
+    await writeFileAtomic(target, "initial");
+    for (let i = 0; i < 100; i += 1) {
+      await writeFileAtomic(target, `replacement-${i}`);
+      assert.equal(await readFile(target, "utf8"), `replacement-${i}`);
+    }
+    assert.deepEqual(await readdir(dir), ["catalog.json"]);
+  });
+});
+
+test("concurrent writes to one path are serialized with the latest call winning", async () => {
   await withTempDir(async (dir) => {
     const target = join(dir, "catalog.json");
     const payloads = Array.from({ length: 40 }, (_, i) => `payload-${i}-${"x".repeat(i * 32)}`);
 
     await Promise.all(payloads.map((payload) => writeFileAtomic(target, payload)));
 
-    // A partial/truncated file would not exactly equal any input payload.
     const finalContent = await readFile(target, "utf8");
-    assert.ok(payloads.includes(finalContent), "final content must be exactly one written payload");
+    assert.equal(finalContent, payloads.at(-1));
 
     // Collision-safe temp names mean no *.tmp survivors from the racing writers.
     const entries = await readdir(dir);

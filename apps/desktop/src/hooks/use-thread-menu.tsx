@@ -10,6 +10,7 @@ import {
 import type { DesktopAppState, WorkspaceSessionTarget } from "../desktop-state";
 import type { PiDesktopApi } from "../ipc";
 import type { ThreadListEntry } from "../thread-groups";
+import { useTranslation } from "react-i18next";
 
 interface UseThreadMenuParams {
   readonly api: PiDesktopApi;
@@ -34,13 +35,14 @@ export interface ThreadMenuState {
   readonly startRename: (thread: ThreadListEntry) => void;
   readonly submitRename: (thread: ThreadListEntry) => void;
   readonly cancelRename: () => void;
-  readonly archiveOrRestore: (thread: ThreadListEntry) => void;
+  readonly deleteThread: (thread: ThreadListEntry) => void;
   readonly markRead: (thread: ThreadListEntry) => void;
   readonly copySessionId: (thread: ThreadListEntry) => void;
   readonly runMenuAction: (event: ReactMouseEvent<HTMLElement>, action: () => void) => void;
 }
 
 export function useThreadMenu({ api, setSnapshot, updateSnapshot }: UseThreadMenuParams): ThreadMenuState {
+  const { t } = useTranslation();
   const [menuSessionId, setMenuSessionId] = useState<string | null>(null);
   const [renameSessionId, setRenameSessionId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
@@ -120,9 +122,13 @@ export function useThreadMenu({ api, setSnapshot, updateSnapshot }: UseThreadMen
       setRenameSessionId(null);
       setRenameDraft("");
     },
-    archiveOrRestore: (thread) => {
-      const target = targetFor(thread);
-      mutate(() => thread.session.archivedAt ? api.unarchiveSession(target) : api.archiveSession(target));
+    deleteThread: (thread) => {
+      setMenuSessionId(null);
+      const confirmed = window.confirm(
+        t("sidebar.deleteThreadConfirmation", { name: thread.session.title }),
+      );
+      if (!confirmed) return;
+      mutate(() => api.deleteSession(targetFor(thread)));
     },
     markRead: (thread) => mutate(() => api.markSessionRead(targetFor(thread))),
     copySessionId: (thread) => {

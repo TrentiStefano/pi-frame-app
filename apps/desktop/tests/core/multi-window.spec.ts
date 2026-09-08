@@ -1,6 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
+import type { SessionDriverEvent } from "@pi-frame/session-driver";
 import {
   createNamedThread,
   emitTestSessionEvent,
@@ -48,7 +49,7 @@ async function waitForWindowCount(harness: DesktopHarness, count: number): Promi
 }
 
 async function browserWindowIndexForPage(harness: DesktopHarness, source: Page): Promise<number> {
-  const marker = `pi-gui-window-${Date.now()}-${Math.random()}`;
+  const marker = `pi-frame-window-${Date.now()}-${Math.random()}`;
   await source.evaluate((value) => {
     Object.assign(window, { __piGuiTestWindowMarker: value });
   }, marker);
@@ -321,6 +322,96 @@ test("opens multiple app windows with independent workspace and thread selection
   }
 });
 
+test("does not cancel another window's run when the sender has no selected session", async () => {
+  test.setTimeout(120_000);
+
+  const userDataDir = await makeUserDataDir();
+  const activePath = await makeWorkspace("multi-window-cancel-active");
+  const emptyPath = await makeWorkspace("multi-window-cancel-empty");
+  const harness = await launchDesktop(userDataDir, {
+    initialWorkspaces: [activePath, emptyPath],
+    testMode: "background",
+  });
+
+  try {
+    const firstWindow = await harness.firstWindow();
+    await waitForWorkspaceByPath(firstWindow, activePath);
+    await waitForWorkspaceByPath(firstWindow, emptyPath);
+    await createNamedThread(firstWindow, "Active run", { workspaceName: basename(activePath) });
+    await selectSession(firstWindow, "Active run");
+
+    const secondWindow = await openWindowViaShortcut(harness, firstWindow);
+    await secondWindow.locator(".workspace-row__select", { hasText: basename(emptyPath) }).click();
+    await expect.poll(() => selectedSummary(secondWindow)).toEqual({
+      workspacePath: emptyPath,
+      sessionTitle: "",
+    });
+
+    const activeState = await getDesktopState(firstWindow);
+    const activeWorkspace = activeState.workspaces.find((workspace) => workspace.path === activePath);
+    const activeSession = activeWorkspace?.sessions.find((session) => session.title === "Active run");
+    if (!activeWorkspace || !activeSession) {
+      throw new Error("Expected the active session before testing window-scoped cancellation");
+    }
+    const sessionRef = { workspaceId: activeWorkspace.id, sessionId: activeSession.id };
+    const firstWindowIndex = await browserWindowIndexForPage(harness, firstWindow);
+    await harness.electronApp.evaluate(({ BrowserWindow }, index) => {
+      const target = BrowserWindow.getAllWindows()[index];
+      target?.show();
+      target?.focus();
+      target?.emit("focus");
+    }, firstWindowIndex);
+    await expectSelected(firstWindow, activePath, "Active run");
+
+    const timestamp = new Date().toISOString();
+    const runningEvent: Extract<SessionDriverEvent, { type: "sessionUpdated" }> = {
+      type: "sessionUpdated",
+      sessionRef,
+      timestamp,
+      runId: "multi-window-cancel-run",
+      snapshot: {
+        ref: sessionRef,
+        workspace: {
+          workspaceId: activeWorkspace.id,
+          path: activeWorkspace.path,
+          displayName: activeWorkspace.name,
+        },
+        title: activeSession.title,
+        status: "running",
+        updatedAt: timestamp,
+        preview: "Running in another window",
+        runningRunId: "multi-window-cancel-run",
+      },
+    };
+    await emitTestSessionEvent(harness, runningEvent);
+    await expect.poll(async () => {
+      const state = await getDesktopState(firstWindow);
+      return state.workspaces
+        .find((workspace) => workspace.id === sessionRef.workspaceId)
+        ?.sessions.find((session) => session.id === sessionRef.sessionId)
+        ?.status;
+    }).toBe("running");
+
+    await secondWindow.evaluate(async () => {
+      const app = (window as PiAppWindow).piApp;
+      if (!app) {
+        throw new Error("piApp IPC bridge is unavailable");
+      }
+      await app.cancelCurrentRun();
+    });
+
+    await expect.poll(async () => {
+      const state = await getDesktopState(firstWindow);
+      return state.workspaces
+        .find((workspace) => workspace.id === sessionRef.workspaceId)
+        ?.sessions.find((session) => session.id === sessionRef.sessionId)
+        ?.status;
+    }).toBe("running");
+  } finally {
+    await harness.close();
+  }
+});
+
 test("projects sender state emissions from the in-flight selection", async () => {
   const userDataDir = await makeUserDataDir();
   const workspacePath = await makeWorkspace("multi-window-sender-projection");
@@ -379,33 +470,26 @@ test("keeps sender dialog actions scoped without blocking another window", async
     });
     await waitForDelayedOpenDialog(harness);
 
-    const settlePick = async () => {
-      await resolveDelayedOpenDialog(harness);
-      await pickPromise;
-    };
-    try {
-      await Promise.race([
-        selectSessionViaIpc(secondWindow, "Attachment sender thread"),
-        secondWindow.waitForTimeout(2_000).then(() => {
-          throw new Error("Second window selection was blocked by the first window attachment dialog.");
-        }),
-      ]);
-      await expectSelected(secondWindow, workspacePath, "Attachment sender thread");
-      await selectSessionViaIpc(secondWindow, "Attachment focused thread");
-      await expectSelected(secondWindow, workspacePath, "Attachment focused thread");
+    const secondWindowIndex = await browserWindowIndexForPage(harness, secondWindow);
+    await harness.electronApp.evaluate(({ BrowserWindow }, index) => {
+      const targetWindow = BrowserWindow.getAllWindows()[index];
+      targetWindow?.show();
+      targetWindow?.focus();
+      targetWindow?.emit("focus");
+    }, secondWindowIndex);
 
-      const secondWindowIndex = await browserWindowIndexForPage(harness, secondWindow);
-      await harness.electronApp.evaluate(({ BrowserWindow }, index) => {
-        const targetWindow = BrowserWindow.getAllWindows()[index];
-        targetWindow?.show();
-        targetWindow?.focus();
-        targetWindow?.emit("focus");
-      }, secondWindowIndex);
-    } catch (error) {
-      await settlePick().catch(() => undefined);
-      throw error;
-    }
-    await settlePick();
+    await Promise.race([
+      selectSessionViaIpc(secondWindow, "Attachment sender thread"),
+      secondWindow.waitForTimeout(2_000).then(() => {
+        throw new Error("Second window selection was blocked by the first window attachment dialog.");
+      }),
+    ]);
+    await expectSelected(secondWindow, workspacePath, "Attachment sender thread");
+    await selectSessionViaIpc(secondWindow, "Attachment focused thread");
+    await expectSelected(secondWindow, workspacePath, "Attachment focused thread");
+
+    await resolveDelayedOpenDialog(harness);
+    await pickPromise;
 
     await expect.poll(async () => (await getDesktopState(firstWindow)).composerAttachments.map((entry) => entry.name)).toEqual([
       "sender-attachment.txt",
@@ -474,7 +558,8 @@ test("opens independent terminals for the same thread in separate windows", asyn
     const secondWindow = await openWindowViaShortcut(harness, firstWindow);
     await expectSelected(secondWindow, workspacePath, "Shared terminal thread");
 
-    await firstWindow.getByLabel("Toggle terminal").click();
+    await firstWindow.getByTestId("workspace-tools").click();
+    await firstWindow.getByRole("menuitem", { name: "Toggle terminal" }).click();
     const firstTerminal = firstWindow.getByTestId("integrated-terminal");
     await expect(firstTerminal).toBeVisible();
     await firstTerminal.locator(".xterm").click();
@@ -484,7 +569,8 @@ test("opens independent terminals for the same thread in separate windows", asyn
       timeout: 15_000,
     });
 
-    await secondWindow.getByLabel("Toggle terminal").click();
+    await secondWindow.getByTestId("workspace-tools").click();
+    await secondWindow.getByRole("menuitem", { name: "Toggle terminal" }).click();
     const secondTerminal = secondWindow.getByTestId("integrated-terminal");
     await expect(secondTerminal).toBeVisible();
     await secondTerminal.locator(".xterm").click();

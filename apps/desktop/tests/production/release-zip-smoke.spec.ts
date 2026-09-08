@@ -11,7 +11,7 @@ import { assertPackagedAppCanStartThread } from "./packaged-smoke-assertions";
 test("launches the packaged release zip app bundle from an extracted download path and starts a thread", async () => {
   test.setTimeout(120_000);
 
-  const userDataDir = await makeUserDataDir("pi-gui-release-zip-user-data-");
+  const userDataDir = await makeUserDataDir("pi-frame-release-zip-user-data-");
   const workspacePath = await makeWorkspace("release-zip-smoke-workspace");
   const promptText = "Release zip smoke thread";
   const appBundlePath = await extractPackagedReleaseZipAppBundle();

@@ -187,7 +187,7 @@ test("does not request notification permission when all notification categories 
 
 test("does not request notification permission twice after macOS decides during this launch", async () => {
   for (const status of ["denied", "granted"] as const) {
-    const userDataDir = await makeUserDataDir(`pi-gui-notification-decides-${status}-`);
+    const userDataDir = await makeUserDataDir(`pi-frame-notification-decides-${status}-`);
     const requestLogPath = join(userDataDir, `notification-onboarding-decides-${status}.log`);
     const workspacePath = await makeWorkspace(`notification-onboarding-decides-${status}-workspace`);
     const harness = await launchDesktop(userDataDir, {
@@ -224,7 +224,7 @@ test("does not request notification permission twice after macOS decides during 
 
 test("does not request notification permission again after macOS already decided", async () => {
   for (const status of ["denied", "granted"] as const) {
-    const userDataDir = await makeUserDataDir(`pi-gui-notification-${status}-`);
+    const userDataDir = await makeUserDataDir(`pi-frame-notification-${status}-`);
     const requestLogPath = join(userDataDir, `notification-onboarding-${status}.log`);
     const workspacePath = await makeWorkspace(`notification-onboarding-${status}-workspace`);
     const harness = await launchDesktop(userDataDir, {

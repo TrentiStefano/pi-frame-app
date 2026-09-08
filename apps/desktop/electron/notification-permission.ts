@@ -1,4 +1,4 @@
-import { app, type BrowserWindow, shell } from "electron";
+import { app, type BrowserWindow, Notification, shell } from "electron";
 import { execFile } from "node:child_process";
 import { appendFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -103,8 +103,10 @@ export class NotificationPermissionService {
   }
 
   async openSystemSettings(): Promise<void> {
-    this.reconciliationBaselineStatus = await this.getCurrentStatus();
     this.clearReconciliationPoll();
+    this.reconciliationBaselineStatus = process.platform === "darwin"
+      ? await this.getCurrentStatus()
+      : null;
     await openSystemNotificationSettingsInternal();
   }
 
@@ -180,6 +182,10 @@ async function readNotificationPermissionStatus(
     return testPermissionStatus;
   }
 
+  if (process.platform === "win32") {
+    return Notification.isSupported() ? "system-managed" : "unsupported";
+  }
+
   const packagedMacOsStatus = await readPackagedMacOsNotificationPermissionStatus();
   if (packagedMacOsStatus) {
     return packagedMacOsStatus;
@@ -193,6 +199,14 @@ async function requestNotificationPermissionInternal(
 ): Promise<DesktopNotificationPermissionStatus> {
   await logPermissionRequestAttempt();
   const override = normalizePermissionStatus(process.env[TEST_REQUEST_RESULT_ENV]);
+  if (process.platform === "win32") {
+    if (override) {
+      testPermissionStatus = override;
+      return override;
+    }
+    return readNotificationPermissionStatus(window);
+  }
+
   if (process.platform === "darwin" && app.isPackaged) {
     if (override) {
       await updatePackagedHelperOverrideStatus(override);
@@ -252,6 +266,15 @@ async function openSystemNotificationSettingsInternal(): Promise<void> {
   const testLogPath = process.env[TEST_SETTINGS_LOG_PATH_ENV]?.trim();
   if (testLogPath) {
     await appendFile(testLogPath, `${new Date().toISOString()}\n`, "utf8");
+    return;
+  }
+
+  if (process.platform === "win32") {
+    try {
+      await shell.openExternal("ms-settings:notifications");
+    } catch {
+      await shell.openExternal("ms-settings:");
+    }
     return;
   }
 
@@ -350,6 +373,7 @@ function normalizePermissionStatus(value: unknown): DesktopNotificationPermissio
     case "granted":
     case "denied":
     case "default":
+    case "system-managed":
     case "unsupported":
     case "unknown":
       return value;

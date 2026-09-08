@@ -1,171 +1,106 @@
-# pi-gui
+# pi-frame
 
-A Codex-style desktop app for the [`pi`](https://github.com/earendil-works/pi) coding agent.
+A powerful, Codex-style Electron desktop workspace for the [`pi`](https://github.com/earendil-works/pi) coding agent.
 
+[![Version](https://img.shields.io/badge/version-0.2.0--beta.6-orange.svg)](./apps/desktop/package.json)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Latest release](https://img.shields.io/github/v/release/minghinmatthewlam/pi-gui?include_prereleases&label=release)](https://github.com/minghinmatthewlam/pi-gui/releases)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)](#install)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#install)
 
-pi-gui gives `pi` a native home on the desktop: a threaded timeline of your agent
-sessions, git worktrees per thread, an integrated terminal and inline diff viewer,
-and multi-agent orchestration — all backed by `pi`'s own session files as the source
-of truth. It is a UI shell around [`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent),
-not a separate agent runtime: session management, model/auth setup, and agent
-execution all run through upstream `pi`.
+`pi-frame` brings long-running agent workflows into a native, high-performance Electron desktop environment: persistent conversation timelines, isolated Git worktrees, parallel agent execution, visual diffs, integrated terminals, browser automation, Computer Use, and custom provider/model settings—all unified without replacing or forking the upstream `pi` agent runtime.
 
-![pi-gui in action](./docs/assets/demo.gif)
+![pi-frame overview](./docs/assets/parallel-sessions.gif)
 
-<sub>Expanding a tool call, reviewing the diff panel, the integrated terminal, and a theme switch. ([higher-quality MP4](./docs/assets/demo.mp4))</sub>
+## Highlights
+
+| Parallel sessions | Commands and model controls |
+| --- | --- |
+| ![Run and switch between agent sessions](./docs/assets/parallel-sessions.gif) | ![Use slash commands and switch models](./docs/assets/slash-commands.gif) |
+
+- **Conversation-first workspace**: Persistent timelines, collapsible tool calls, prompt queuing, transcript search, and crash recovery.
+- **Parallel work without collisions**: Local threads, per-thread Git worktrees, branching/forking, and multi-agent coordination.
+- **Code review in context**: Integrated terminal (xterm.js), repository tree explorer, inline visual diffs, file mentions (`@`), and image attachments.
+- **Built-in browser and Computer Use**: Agent-driven browsing with DevTools integration and desktop OS interaction on macOS and Windows.
+- **Native desktop ergonomics**: Light and dark themes, configurable keybindings, desktop notifications, and offline voice input.
+- **Upstream-compatible runtime**: Uses `pi` JSONL sessions, providers, models, skills, extensions, and authentication as the authoritative source of truth.
 
 ## Screenshots
 
-| Thread timeline (dark) | Thread timeline (light) |
+| Conversation timeline | Inline diff |
 | --- | --- |
-| ![Thread view, dark theme](./docs/assets/thread-dark.png) | ![Thread view, light theme](./docs/assets/thread-light.png) |
+| ![Conversation timeline](./docs/assets/thread-dark.png) | ![Inline diff viewer](./docs/assets/diff-dark.png) |
 
-| Inline diff viewer | Integrated terminal |
+| Integrated terminal | Light theme |
 | --- | --- |
-| ![Diff panel](./docs/assets/diff-dark.png) | ![Integrated terminal](./docs/assets/terminal-dark.png) |
+| ![Integrated terminal](./docs/assets/terminal-dark.png) | ![Light theme](./docs/assets/thread-light.png) |
 
-## Features
+## Quick Start
 
-- **Threaded timeline** — each session renders as a timeline of messages and
-  collapsible tool calls, Codex-style.
-- **Git worktrees per thread** — start a thread in the workspace directly (`Local`)
-  or in an isolated git worktree so parallel work never collides.
-- **Multi-agent orchestration** — an orchestrator thread can spin up and supervise
-  child worker threads.
-- **Integrated terminal** — a real PTY terminal (via `node-pty`) docked in the app.
-- **Inline diff viewer** — review changed files in a side panel (toggle with
-  <kbd>⌘/Ctrl</kbd>+<kbd>D</kbd>).
-- **Composer niceties** — `@`-mention files, and paste or drag-and-drop image
-  attachments straight into the prompt.
-- **Skills & extensions** — manage `pi` skills and extensions from a dedicated view.
-- **Appearance themes** — light and dark, with selectable theme presets.
-- **Native notifications** — get an OS notification when an agent run finishes.
-- **Session archive** — archive threads you're done with to keep the sidebar tidy.
-- **Multiple providers** — connect model providers via OAuth or API key under
-  **Settings → Providers**.
-
-## Install
-
-pi-gui is in public beta for **macOS (Apple Silicon)** and **Linux (AppImage)**.
-
-### From GitHub Releases
-
-Download the latest `.dmg` (macOS) or `.AppImage` (Linux) from the
-[Releases page](https://github.com/minghinmatthewlam/pi-gui/releases).
-
-On macOS, drag `pi-gui.app` into `/Applications` and launch it. Releases are signed
-and notarized. To update, download the newer release and replace the app.
-
-### With Homebrew (macOS)
-
-```bash
-brew tap minghinmatthewlam/tap
-brew install --cask pi-gui
-```
-
-Update with `brew upgrade --cask pi-gui`. During beta, a Homebrew upgrade may prompt
-you to re-confirm macOS permissions or Dock placement.
-
-### From source
-
-See [Development](#development). Building from source is intended for contributors,
-not as the primary install path.
-
-## Quickstart
-
-1. Install pi-gui and launch it.
-2. Open **Settings → Providers** and connect a model provider (OAuth or API key).
-3. Add a workspace (a local project folder).
-4. Click **New thread**, pick `Local` or `Worktree`, and send your first prompt.
-
-You need valid model/provider authentication that `pi` supports; pi-gui uses `pi`'s
-auth and session state, so anything you've already configured with the `pi` CLI
-carries over.
-
-## Architecture
-
-pi-gui is an Electron app organized around a tight main/preload/renderer boundary,
-sitting on top of the `pi` runtime:
-
-- **Renderer** (`apps/desktop/src`) — the React UI: timeline, composer, diff panel,
-  terminal, settings. It talks to the main process only through a typed IPC surface.
-- **Preload** (`apps/desktop/electron/preload.ts`) — the narrow bridge that exposes
-  that IPC surface to the renderer; the renderer gets no broad Node access.
-- **Main** (`apps/desktop/electron`) — the Node side: windowing, session supervision,
-  worktrees, terminal PTYs, notifications, and persistence.
-- **`packages/pi-sdk-driver`** — a thin adapter from the desktop app to
-  `@earendil-works/pi-coding-agent`. It stays close to upstream `pi` and does not
-  fork or reimplement runtime behavior.
-- **JSONL session files as the source of truth** — `pi` persists each session as a
-  JSONL transcript on disk; pi-gui reads those files as the authoritative record for
-  closed sessions rather than keeping a divergent copy.
-
-Supporting packages: `packages/session-driver` (shared session driver types) and
-`packages/catalogs` (lightweight workspace/session catalog state).
+1. Launch `pi-frame` and add a local repository as a workspace.
+2. Open **Settings -> Providers** and connect a provider supported by `pi` (Anthropic, OpenAI, OpenRouter, Ollama, custom OpenAI-compatible endpoints, etc.).
+3. Create a **Local** thread or an isolated **Worktree** thread.
+4. Choose a model and send a prompt. Existing `pi` authentication and JSONL sessions remain fully compatible.
 
 ## Development
 
-Requires Node 20+ and [pnpm](https://pnpm.io) (managed via `corepack`). pnpm is
-the supported package manager, and `pnpm-lock.yaml` is the authoritative lockfile.
+### Prerequisites
+
+- Node.js 20+
+- pnpm 10.25.0 (managed via `corepack`)
+- Platform prerequisites described in [`apps/desktop/README.md`](./apps/desktop/README.md)
+
+### Setup & Run
 
 ```bash
 corepack enable
 pnpm install
+pnpm dev
 ```
 
-Common commands (run from the repo root):
+### Common Commands
 
 ```bash
-pnpm dev         # run the desktop app in development (electron-vite, hot reload)
-pnpm build       # build all workspaces
-pnpm typecheck   # type-check all workspaces
-pnpm lint        # lint all workspaces
-pnpm test        # run each workspace's tests (desktop runs the core E2E lane)
+pnpm build         # Build all packages and desktop app
+pnpm typecheck     # Typecheck all workspaces
+pnpm lint          # Lint all workspaces
+pnpm test          # Run affected Playwright tests
+pnpm test:all      # Run complete default test suite
+pnpm package:win   # Package Windows installer and portable builds
+pnpm package:mac   # Package macOS DMG/ZIP
+pnpm package:linux # Package Linux AppImage
 ```
 
-Desktop end-to-end tests use a Playwright + Electron harness and are organized into
-lanes. The default `pnpm test` runs the `core` lane; to run everything:
+## Architecture
 
-```bash
-pnpm --filter @pi-gui/desktop run test:e2e:all   # core + live + native
+```text
+apps/desktop                 Electron main, preload, React renderer, and Playwright tests
+apps/website                 Project website and landing page
+packages/pi-sdk-driver       Thin adapter over the upstream pi runtime
+packages/session-driver      Shared session interfaces and durable state contracts
+packages/catalogs            Workspace and session catalog management
 ```
 
-See [`apps/desktop/README.md`](./apps/desktop/README.md) for lane details and
-platform-specific packaging notes. Package a Linux AppImage locally with:
+- **Strict Boundary**: The renderer has no broad Node.js access. A narrow, typed IPC bridge connects the React UI to Electron main.
+- **Thin Driver Layer**: `packages/pi-sdk-driver` acts as a thin bridge over `@earendil-works/pi-coding-agent`, preserving `pi` runtime behavior.
+- **Authoritative Storage**: JSONL session files in the `.pi` directory remain the single source of truth for session history.
 
-```bash
-pnpm --filter @pi-gui/desktop run package:linux
-```
+## Lineage & Acknowledgments
 
-## Repository layout
+`pi-frame` is built upon the incredible work of the open-source community. We gratefully and ethically acknowledge:
 
-- `apps/desktop` — the Electron app (renderer UI + main/preload).
-- `apps/website` — the marketing/landing site.
-- `packages/pi-sdk-driver` — adapter over `@earendil-works/pi-coding-agent`.
-- `packages/session-driver` — shared session driver types.
-- `packages/catalogs` — workspace/session catalog state.
+1. **[`pi-gui`](https://github.com/minghinmatthewlam/pi-gui)** — Created by **[Matthew Lam](https://github.com/minghinmatthewlam)**. `pi-gui` pioneered the original Electron GUI, desktop workspace layout, and foundational session interaction model for the `pi` agent.
+2. **[`pi-desktop`](https://github.com/mshen6666/pi-desktop)** — Maintained and expanded by **[mshen6666](https://github.com/mshen6666)**. `pi-desktop` contributed major product evolutions, Windows Computer Use desktop automation, offline voice input, worktree orchestration, and extensive packaging workflows.
+3. **[`pi`](https://github.com/earendil-works/pi)** — Created by **[Earendil Works](https://github.com/earendil-works)**. The upstream `pi` coding agent runtime (`@earendil-works/pi-coding-agent`) provides the core agent execution engine, tool interfaces, provider architecture, and skill system.
+
+`pi-frame` maintains full compatibility with upstream `pi` session formats and provider contracts while continuing to evolve the desktop experience.
+
+## Compatibility identifiers
+
+The packaged macOS notification helper keeps its historical `pi-gui-notification-status-helper` filename because native notification registration and upgrade compatibility depend on that identifier. Session attachment markers, browser markers, lease surface values, the default catalog path (`~/.pi-gui/catalogs.json`), and existing main/preload IPC channel strings retain their historical names for persisted/protocol compatibility; they are not current product branding.
 
 ## Contributing
 
-Contributions are welcome — see [CONTRIBUTING.md](./CONTRIBUTING.md) for setup,
-verification expectations, and the desktop test lanes. Desktop changes are expected
-to be verified on the real Electron surface, not only by unit tests.
-
-## Computer use
-
-Native computer use is not built into pi-gui. Desktop/browser control is available
-separately through the author's standalone
-[`computer-use-mcp`](https://github.com/minghinmatthewlam/computer-use-mcp) server,
-which any MCP-capable agent can use.
-
-## Acknowledgements
-
-- Built on [`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent).
-- Upstream runtime and ecosystem by [`earendil-works/pi`](https://github.com/earendil-works/pi).
+See [CONTRIBUTING.md](./CONTRIBUTING.md) and [PROJECT_DESCRIPTION.md](./PROJECT_DESCRIPTION.md). Desktop changes must be verified on the real Electron surface using the appropriate Playwright test lane.
 
 ## License
 
-[MIT](./LICENSE) © Matthew Lam
+Distributed under the [MIT License](./LICENSE). See [LICENSE](./LICENSE) and individual package notices for copyright and upstream attribution details.

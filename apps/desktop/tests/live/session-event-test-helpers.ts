@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import type { SessionRef } from "@pi-gui/session-driver";
+import type { SessionRef } from "@pi-frame/session-driver";
 import { getDesktopState, launchDesktop } from "../helpers/electron-app";
 
 type DesktopTestApi = {

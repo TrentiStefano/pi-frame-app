@@ -25,10 +25,11 @@
   place-items: center;
 }
 
-.new-thread__logo svg {
+.new-thread__logo img {
   width: 44px;
   height: 44px;
   display: block;
+  border-radius: 10px;
 }
 
 .new-thread__eyebrow {
@@ -51,23 +52,115 @@
   margin: 0;
 }
 
+.new-thread__composer-shell {
+  width: min(820px, 100%);
+  margin: 0 auto;
+}
+
 .new-thread__workspace-picker {
-  display: grid;
-  justify-items: center;
+  position: relative;
+  min-width: 0;
+  max-width: 210px;
 }
 
 .new-thread__workspace {
-  padding: 8px 12px;
-  border-radius: var(--radius-pill);
-  border: 1px solid var(--line);
-  background: var(--surface);
+  max-width: 100%;
+}
+
+.new-thread__workspace:hover,
+.new-thread__workspace[aria-expanded="true"] {
+  border-color: transparent;
+  background: var(--overlay-hover);
   color: var(--text-strong);
-  font: inherit;
+}
+
+.new-thread__workspace:focus-visible {
+  border-color: var(--focus-ring-border);
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.new-thread__workspace-icon,
+.new-thread__workspace-chevron,
+.new-thread__workspace-option-icon,
+.new-thread__workspace-check {
+  display: grid;
+  place-items: center;
+}
+
+.new-thread__workspace-icon svg,
+.new-thread__workspace-option-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.new-thread__workspace-chevron svg,
+.new-thread__workspace-check svg {
+  width: 14px;
+  height: 14px;
+}
+
+.new-thread__workspace-chevron {
+  color: var(--muted-soft);
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+
+.new-thread__workspace[aria-expanded="true"] .new-thread__workspace-chevron {
+  transform: rotate(180deg);
+}
+
+.new-thread__workspace-name,
+.new-thread__workspace-option-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.new-thread__workspace-menu {
+  width: min(320px, calc(100vw - 72px));
+}
+
+.new-thread__workspace-menu-label {
+  padding: 5px 8px 7px;
+  color: var(--muted-soft);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.new-thread__workspace-list {
+  max-height: min(280px, 42vh);
+  overflow-y: auto;
+}
+
+.new-thread__workspace-option {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 18px;
+}
+
+.new-thread__workspace-option:hover,
+.new-thread__workspace-option:focus-visible {
+  background: var(--surface-muted);
+  color: var(--text-strong);
+}
+
+.new-thread__workspace-option:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--focus-ring-border);
+}
+
+.new-thread__workspace-option--selected {
+  color: var(--text-strong);
+  font-weight: 560;
+}
+
+.new-thread__workspace-check {
+  color: var(--accent);
 }
 
 .new-thread__composer {
-  width: min(820px, 100%);
-  margin: 0 auto;
+  width: 100%;
+  margin: 0;
 }
 
 .new-thread__composer.composer {
@@ -79,25 +172,36 @@
   width: 100%;
 }
 
+.new-thread__environment-picker {
+  position: relative;
+  flex: 0 0 auto;
+}
+
 .new-thread__environment-group {
   display: inline-flex;
-  gap: 8px;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-muted);
 }
 
 .new-thread__environment {
-  padding: 7px 11px;
-  border-radius: var(--radius-pill);
-  border: 1px solid var(--line);
-  background: var(--surface-muted);
+  min-height: 30px;
+  padding: 5px 10px;
+  border-radius: var(--radius-md);
   color: var(--muted-strong);
   font-size: 13px;
-  font-weight: 560;
+  font-weight: 550;
+}
+
+.new-thread__environment:hover:not(:disabled) {
+  color: var(--text-strong);
 }
 
 .new-thread__environment--active {
-  border-color: var(--line-strong);
-  background: var(--accent-tint-bg);
+  background: var(--surface);
   color: var(--text-strong);
+  box-shadow: var(--elevation-hairline);
 }
 
 .new-thread__textarea {
@@ -111,17 +215,30 @@
   line-height: 1.55;
 }
 
-.new-thread__textarea:focus {
+.new-thread__textarea:focus,
+.new-thread__textarea:focus-visible {
   outline: none;
+  box-shadow: none;
 }
 
 .new-thread__hint {
   display: flex;
   align-items: center;
-  gap: 10px;
+  min-width: 0;
+  gap: 2px;
   flex-wrap: wrap;
 }
 
-.new-thread__hint-separator {
-  color: var(--muted-soft);
+@media (max-width: 700px) {
+  .new-thread__hero {
+    display: none;
+  }
+
+  .new-thread {
+    min-height: calc(100vh - 120px);
+  }
+
+  .new-thread__workspace-picker {
+    max-width: 150px;
+  }
 }

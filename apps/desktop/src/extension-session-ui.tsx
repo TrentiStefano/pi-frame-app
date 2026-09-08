@@ -1,87 +1,8 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
-import type { HostUiResponse } from "@pi-gui/session-driver";
+import type { HostUiResponse } from "@pi-frame/session-driver";
 import { trapDialogFocus } from "./dialog-focus";
-import { ChevronDownIcon, ChevronRightIcon } from "./icons";
-import type { SessionExtensionDialogRecord, SessionExtensionUiStateRecord } from "./desktop-state";
-
-const ANSI_ESCAPE_PATTERN = /\u001B\[[0-?]*[ -/]*[@-~]/g;
-const DOCK_SEGMENT_SEPARATOR = "--------------------";
-const GENERIC_ACTIVE_LABEL = "Extension UI active";
-
-interface ExtensionDockBlock {
-  readonly key: string;
-  readonly lines: readonly string[];
-}
-
-export interface ExtensionDockModel {
-  readonly summaryText: string;
-  readonly bodyText: string;
-}
-
-export function hasExtensionDockContent(uiState?: SessionExtensionUiStateRecord): boolean {
-  if (!uiState) {
-    return false;
-  }
-
-  return uiState.statuses.length > 0 || uiState.widgets.length > 0;
-}
-
-export function buildExtensionDockModel(uiState?: SessionExtensionUiStateRecord): ExtensionDockModel | undefined {
-  if (!hasExtensionDockContent(uiState)) {
-    return undefined;
-  }
-
-  const statuses = (uiState?.statuses ?? [])
-    .map((status) => ({
-      key: status.key,
-      text: sanitizeDockText(status.text),
-    }))
-    .filter((status) => status.text.trim().length > 0);
-  const primaryBlocks = buildWidgetBlocks(uiState?.widgets ?? [], "aboveComposer");
-  const secondaryBlocks = buildWidgetBlocks(uiState?.widgets ?? [], "belowComposer");
-  const summaryText = resolveDockSummaryText(statuses, primaryBlocks, secondaryBlocks);
-
-  return {
-    summaryText,
-    bodyText: buildDockBodyText(statuses, primaryBlocks, secondaryBlocks),
-  };
-}
-
-export function ExtensionDock({
-  dock,
-  expanded,
-  onToggle,
-}: {
-  readonly dock: ExtensionDockModel;
-  readonly expanded: boolean;
-  readonly onToggle: () => void;
-}) {
-  return (
-    <div className={`extension-dock ${expanded ? "extension-dock--expanded" : ""}`} data-testid="extension-dock">
-      <button
-        aria-controls="extension-dock-body"
-        aria-expanded={expanded}
-        className="extension-dock__toggle"
-        data-testid="extension-dock-toggle"
-        title={dock.summaryText}
-        type="button"
-        onClick={onToggle}
-      >
-        <span className="extension-dock__summary" data-testid="extension-dock-summary">
-          {dock.summaryText}
-        </span>
-        <span className="extension-dock__chevron" aria-hidden="true">
-          {expanded ? <ChevronDownIcon /> : <ChevronRightIcon />}
-        </span>
-      </button>
-      {expanded ? (
-        <pre className="extension-dock__body" data-testid="extension-dock-body" id="extension-dock-body">
-          {dock.bodyText}
-        </pre>
-      ) : null}
-    </div>
-  );
-}
+import type { SessionExtensionDialogRecord } from "./desktop-state";
+import { useTranslation } from "react-i18next";
 
 export function ExtensionDialog({
   dialog,
@@ -90,6 +11,7 @@ export function ExtensionDialog({
   readonly dialog: SessionExtensionDialogRecord;
   readonly onRespond: (response: HostUiResponse) => void;
 }) {
+  const { t } = useTranslation();
   const [draft, setDraft] = useState("");
   const titleId = useId();
   const bodyId = useId();
@@ -188,7 +110,7 @@ export function ExtensionDialog({
           <input
             autoFocus
             className="skills-search"
-            placeholder={dialog.placeholder ?? "Enter a value"}
+            placeholder={dialog.placeholder ?? t("dialog.enterValue")}
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
           />
@@ -211,7 +133,7 @@ export function ExtensionDialog({
             type="button"
             onClick={respondWithCancel}
           >
-            Cancel
+            {t("common.cancel")}
           </button>
           {dialog.kind === "confirm" ? (
             <button
@@ -220,7 +142,7 @@ export function ExtensionDialog({
               type="button"
               onClick={respondWithSubmit}
             >
-              Confirm
+              {t("common.confirm")}
             </button>
           ) : null}
           {dialog.kind === "input" || dialog.kind === "editor" ? (
@@ -230,89 +152,11 @@ export function ExtensionDialog({
               type="button"
               onClick={respondWithSubmit}
             >
-              Submit
+              {t("common.submit")}
             </button>
           ) : null}
         </div>
       </div>
     </div>
   );
-}
-
-function buildWidgetBlocks(
-  widgets: SessionExtensionUiStateRecord["widgets"],
-  placement: "aboveComposer" | "belowComposer",
-): ExtensionDockBlock[] {
-  return widgets
-    .filter((widget) => widget.placement === placement)
-    .map((widget) => ({
-      key: widget.key,
-      lines: widget.lines.map((line) => sanitizeDockText(line)),
-    }))
-    .filter((widget) => widget.lines.some((line) => line.trim().length > 0));
-}
-
-function resolveDockSummaryText(
-  statuses: readonly { readonly key: string; readonly text: string }[],
-  primaryBlocks: readonly ExtensionDockBlock[],
-  secondaryBlocks: readonly ExtensionDockBlock[],
-): string {
-  for (const status of statuses) {
-    if (status.text.trim().length > 0) {
-      return status.text;
-    }
-  }
-
-  for (const block of [...primaryBlocks, ...secondaryBlocks]) {
-    const summaryLine = block.lines.find((line) => line.trim().length > 0);
-    if (summaryLine) {
-      return summaryLine;
-    }
-  }
-
-  return GENERIC_ACTIVE_LABEL;
-}
-
-function buildDockBodyText(
-  statuses: readonly { readonly key: string; readonly text: string }[],
-  primaryBlocks: readonly ExtensionDockBlock[],
-  secondaryBlocks: readonly ExtensionDockBlock[],
-): string {
-  const totalBlocks = statuses.length + primaryBlocks.length + secondaryBlocks.length;
-  const needsLabels = totalBlocks > 1;
-  const primaryLines = [
-    ...statuses.flatMap((status, index) => renderStatusBlock(status, needsLabels, index > 0)),
-    ...primaryBlocks.flatMap((block, index) => renderWidgetBlock(block, needsLabels, statuses.length + index > 0)),
-  ];
-  const secondaryLines = secondaryBlocks.flatMap((block, index) =>
-    renderWidgetBlock(block, needsLabels, index > 0),
-  );
-
-  if (secondaryLines.length === 0) {
-    return primaryLines.join("\n");
-  }
-
-  if (primaryLines.length === 0) {
-    return secondaryLines.join("\n");
-  }
-
-  return [...primaryLines, "", DOCK_SEGMENT_SEPARATOR, "", ...secondaryLines].join("\n");
-}
-
-function renderStatusBlock(
-  status: { readonly key: string; readonly text: string },
-  needsLabel: boolean,
-  addLeadingGap: boolean,
-): string[] {
-  const lines = [`${needsLabel ? `${status.key}: ` : ""}${status.text}`];
-  return addLeadingGap ? ["", ...lines] : lines;
-}
-
-function renderWidgetBlock(block: ExtensionDockBlock, needsLabel: boolean, addLeadingGap: boolean): string[] {
-  const lines = needsLabel ? [`${block.key}:`, ...block.lines] : [...block.lines];
-  return addLeadingGap ? ["", ...lines] : lines;
-}
-
-function sanitizeDockText(text: string): string {
-  return text.replaceAll("\r\n", "\n").replaceAll("\r", "\n").replace(ANSI_ESCAPE_PATTERN, "");
 }

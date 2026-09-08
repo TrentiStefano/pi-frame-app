@@ -1,12 +1,12 @@
-export interface AugmentPosixPathOptions {
-  readonly platform?: NodeJS.Platform;
-  readonly env?: NodeJS.ProcessEnv;
-  readonly delimiter?: string;
+export interface AugmentMacPathOptions {
+  platform?: NodeJS.Platform;
+  env?: NodeJS.ProcessEnv;
+  delimiter?: string;
 }
 
-export interface AugmentPosixPathResult {
-  readonly changed: boolean;
-  readonly path: string;
+export interface AugmentedPath {
+  changed: boolean;
+  path: string;
 }
 
-export function augmentPosixPath(options?: AugmentPosixPathOptions): AugmentPosixPathResult;
+export function augmentMacPath(options?: AugmentMacPathOptions): AugmentedPath;

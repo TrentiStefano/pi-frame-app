@@ -1,15 +1,17 @@
-import type { SessionConfig } from "@pi-gui/session-driver";
+import type { SessionConfig } from "@pi-frame/session-driver";
 import type {
   RuntimeCommandRecord,
   RuntimeProviderRecord,
   RuntimeSettingsSnapshot,
   RuntimeSnapshot,
-} from "@pi-gui/session-driver/runtime-types";
+} from "@pi-frame/session-driver/runtime-types";
 import type { ExtensionCommandCompatibilityRecord } from "./desktop-state";
 import { titleCase } from "./string-utils";
 
 export type ComposerSlashCommandKind =
   | "runtime"
+  | "computer-use"
+  | "plan"
   | "model"
   | "thinking"
   | "tree"
@@ -20,8 +22,7 @@ export type ComposerSlashCommandKind =
   | "name"
   | "login"
   | "logout"
-  | "settings"
-  | "scoped-models";
+  | "settings";
 
 export interface ComposerSlashCommand {
   readonly id: string;
@@ -64,10 +65,11 @@ export interface ComposerProviderOption extends ComposerSlashOption {
 }
 
 export const MODEL_OPTIONS_EMPTY_TITLE = "No models available";
-export const MODEL_OPTIONS_EMPTY_DESCRIPTION = "Open Settings to enable a model or log in to a provider.";
+export const MODEL_OPTIONS_EMPTY_DESCRIPTION = "Open Settings > Models to add a model and configure its credentials.";
 
 export type ParsedComposerCommand =
   | { type: "model"; provider: string; modelId: string }
+  | { type: "plan" }
   | { type: "thinking"; thinkingLevel: string }
   | { type: "tree" }
   | { type: "status" }
@@ -82,12 +84,31 @@ const INCOMPLETE_COMMAND_MESSAGES: Readonly<Record<string, string>> = {
   "/logout": "Choose a connected provider from the slash menu before sending /logout.",
   "/model": "Choose a provider and model from the slash menu before sending /model.",
   "/name": "Add a thread title after /name.",
-  "/scoped-models": "Open Enabled models from the slash menu or Settings.",
   "/settings": "Open Settings from the slash menu or Cmd+,.",
   "/thinking": "Choose a reasoning level from the slash menu before sending /thinking.",
 } as const;
 
 const HOST_ACTION_SLASH_COMMANDS: readonly ComposerSlashCommand[] = [
+  {
+    id: "host:plan-mode",
+    kind: "plan",
+    command: "/plan",
+    template: "/plan",
+    title: "Plan mode",
+    description: "Turn plan mode on or off",
+    submitMode: "immediate",
+    section: "host",
+  },
+  {
+    id: "host:computer-use",
+    kind: "computer-use",
+    command: "/computer-use",
+    template: "/computer-use ",
+    title: "Computer Use",
+    description: "Control the desktop to complete a task",
+    submitMode: "prefill",
+    section: "host",
+  },
   {
     id: "host:model",
     kind: "model",
@@ -159,16 +180,6 @@ const HOST_ACTION_SLASH_COMMANDS: readonly ComposerSlashCommand[] = [
     section: "host",
   },
   {
-    id: "host:scoped-models",
-    kind: "scoped-models",
-    command: "/scoped-models",
-    template: "/scoped-models",
-    title: "Enabled models",
-    description: "Choose which models appear in pickers",
-    submitMode: "immediate",
-    section: "host",
-  },
-  {
     id: "host:session",
     kind: "session",
     command: "/session",
@@ -212,6 +223,16 @@ const HOST_ACTION_SLASH_COMMANDS: readonly ComposerSlashCommand[] = [
 
 export const THINKING_OPTIONS: readonly ComposerSlashOption[] = [
   {
+    value: "off",
+    label: "Off",
+    description: "Disable optional reasoning for supported models",
+  },
+  {
+    value: "minimal",
+    label: "Minimal",
+    description: "Use the model's lightest available reasoning",
+  },
+  {
     value: "low",
     label: "Low",
     description: "Fast responses with lighter reasoning",
@@ -248,7 +269,9 @@ export function buildSlashCommandSections(
   } = {},
 ): readonly ComposerSlashCommandSection[] {
   const normalizedQuery = query.trim().toLowerCase();
-  const availableRuntimeCommands = resolveRuntimeCommands(runtime, sessionCommands);
+  const availableRuntimeCommands = resolveRuntimeCommands(runtime, sessionCommands).filter(
+    (command) => command.name !== "computer-use",
+  );
   const compatibilityByKey = new Map(
     compatibilityRecords.map((record) => [`${record.extensionPath}::${record.commandName}`, record] as const),
   );
@@ -272,29 +295,18 @@ export function buildSlashCommandSections(
     (command) => (allowTreeCommand || command.kind !== "tree") && matchesCommand(command, normalizedQuery),
   );
 
-  // Prefer a host action when it is a prefix match and runtime skills only
-  // match fuzzily. Otherwise an installed skill such as `observe-state` can
-  // steal `/stat` from the built-in `/status` command on Tab.
-  const hostHasPrefixMatch = hostMatches.some((command) =>
-    command.command.toLowerCase().startsWith(normalizedQuery),
-  );
-  const runtimeHasPrefixMatch = runtimeMatches.some((command) =>
-    command.command.toLowerCase().startsWith(normalizedQuery),
-  );
-  const runtimeSection: ComposerSlashCommandSection = {
-    id: "runtime",
-    title: runtimeMatches.length > 0 ? "Runtime Commands" : undefined,
-    items: runtimeMatches,
-  };
-  const hostSection: ComposerSlashCommandSection = {
-    id: "host",
-    title: hostMatches.length > 0 ? "Host Actions" : undefined,
-    items: hostMatches,
-  };
-  const sections: ComposerSlashCommandSection[] =
-    hostHasPrefixMatch && !runtimeHasPrefixMatch
-      ? [hostSection, runtimeSection]
-      : [runtimeSection, hostSection];
+  const sections: ComposerSlashCommandSection[] = [
+    {
+      id: "runtime",
+      title: runtimeMatches.length > 0 ? "Runtime Commands" : undefined,
+      items: runtimeMatches,
+    },
+    {
+      id: "host",
+      title: hostMatches.length > 0 ? "Host Actions" : undefined,
+      items: hostMatches,
+  },
+];
 
   return sections.filter((section) => section.items.length > 0);
 }
@@ -400,14 +412,13 @@ export function buildModelOptions(
   }
 
   const enabledPatterns = runtime.settings.enabledModelPatterns;
-  const allAvailable = enabledPatterns.length === 0;
-  const enabledSet = allAvailable ? undefined : new Set(enabledPatterns);
+  const enabledSet = new Set(enabledPatterns);
+  const hasExplicitScope = enabledPatterns.length > 0;
 
   return [...runtime.models]
     .filter((model) => {
       if (!model.available) return false;
-      if (!enabledSet) return true;
-      return enabledSet.has(`${model.providerId}/${model.modelId}`);
+      return !hasExplicitScope || enabledSet.has(`${model.providerId}/${model.modelId}`);
     })
     .sort((left: RuntimeSnapshot["models"][number], right: RuntimeSnapshot["models"][number]) => {
       const providerCompare =
@@ -613,6 +624,9 @@ export function formatSessionConfigStatus(config?: SessionConfig): string {
 
 export function parseComposerCommand(value: string): ParsedComposerCommand | undefined {
   const trimmed = value.trim();
+  if (trimmed === "/plan") {
+    return { type: "plan" };
+  }
   if (trimmed === "/tree") {
     return { type: "tree" };
   }
@@ -662,6 +676,11 @@ export function parseComposerCommand(value: string): ParsedComposerCommand | und
   }
 
   return undefined;
+}
+
+export function parseComputerUseComposerCommand(value: string): { readonly task: string } | undefined {
+  const match = value.trim().match(/^\/computer-use(?:\s+([\s\S]*))?$/i);
+  return match ? { task: (match[1] ?? "").trim() } : undefined;
 }
 
 export function incompleteComposerCommandMessage(value: string): string | undefined {

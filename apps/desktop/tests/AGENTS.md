@@ -8,10 +8,16 @@ Apply these rules under `apps/desktop/tests/`.
 - `live`: real provider/runtime runs. Use for transcript, tool-call, parallel-run, and notification behavior that depends on actual agent execution.
 - `native`: macOS OS-surface flows such as folder pickers, image pickers, and real clipboard paste. These are foreground-only and focus-sensitive.
 - `production`: opt-in higher-fidelity smokes such as real-auth `live`, packaged-app launch, and real macOS open-panel coverage. Keep these out of the default `core` and `native` globs so fast lanes stay stable.
-- `pnpm --filter @pi-gui/desktop run test:e2e` currently runs only `core`. Use `test:e2e:all` only when you need all lanes.
+- `pnpm --filter @pi-frame/desktop run test:e2e` currently runs only `core`. Use `test:e2e:all` only when you need all lanes.
+- A narrow `core` or `live` change may close on its directly affected Electron spec(s). Do not run the full owning lane automatically.
+- Streaming performance tests must reproduce the real driver event pattern, including adjacent content deltas, tool updates, and status snapshots. A synthetic delta-only burst is not sufficient proof.
+- Performance assertions must combine exact transcript/order correctness with bounded publish count, queue latency, input latency, memory/process health, and renderer survival. Prefer percentiles over one timing sample; keep correctness and crash assertions hard even when timing budgets need machine-aware calibration.
+- Close Windows performance/stability work with a real Windows Electron run; use the unpacked or installed production lane when dev-mode behavior or packaging could differ.
+- Add related specs and `tests/core/smoke.spec.ts` when a change crosses nearby features or could affect startup/basic thread creation.
+- Run a full owning lane for shared harness/config changes, app bootstrap or preload changes, shared persistence/state-schema changes, cross-feature navigation, multiple unrelated surfaces, CI, and release gates.
 - For `native`, prefer the targeted native spec by default. Expand to `test:e2e:native` only when the change touches shared native helpers, multiple native specs, or lane-wide native behavior.
 - Keep `tests/production` behind dedicated scripts or direct `test:e2e:runner` invocations; do not place those specs under `tests/core` or `tests/native`.
-- Prefer repo lanes over manual Computer Use. If the local Codex skill `$pi-gui-computer-use-smoke` is installed, use it only for release-readiness sweeps on the real installed app or for focus-hostile native surfaces where Playwright is the wrong proof shape.
+- Prefer repo lanes over manual Computer Use. An optional Computer Use smoke check may be used only for release-readiness sweeps on the real installed app or focus-hostile native surfaces where Playwright is the wrong proof shape.
 - The reasoning is the same as the global agent philosophy: optimize for tools plus clear success criteria, not ad hoc manual steps. Playwright remains the deterministic regression signal; Computer Use is an opt-in complement for believable real-surface proof.
 - Prefer shared helpers in `tests/helpers/electron-app.ts`; extend them instead of adding a second harness or new IPC glue.
 - Simulate user behavior through Playwright first. Do not add IPC/state shortcuts for visible behavior unless the product surface does not exist yet; if you need one, document the gap in the spec.

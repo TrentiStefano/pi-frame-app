@@ -6,8 +6,8 @@ import type {
   CatalogStorage,
   WorktreeCatalogEntry,
   WorktreeCatalogSnapshot,
-} from "@pi-gui/catalogs";
-import type { WorkspaceRef } from "@pi-gui/session-driver";
+} from "@pi-frame/catalogs";
+import type { WorkspaceRef } from "@pi-frame/session-driver";
 
 const execFileAsync = promisify(execFile);
 
@@ -32,7 +32,7 @@ export interface DestroyCreatedWorktreeInput {
 }
 
 export interface PruneOrphanedWorktreesInput {
-  /** Absolute, profile-owned root under which the app creates its worktrees. */
+  /** Absolute root under which the app creates its worktrees (`~/.pi/worktrees`). */
   readonly worktreeRoot: string;
   /** Canonicalized worktree/workspace paths that must never be pruned. */
   readonly referencedPaths: ReadonlySet<string>;
@@ -164,10 +164,10 @@ export class GitWorktreeManager {
 
   /**
    * Startup reconcile pass: remove git worktrees under the app's worktree root
-   * that no longer have a catalog/session reference. Only merged `pi/*` branches
-   * are eligible. Never force-removes a dirty worktree (a non-`--force`
-   * `git worktree remove` refuses when the tree is modified), so user work is
-   * never destroyed — protected worktrees are skipped and reported instead.
+   * that no longer have a catalog/session reference. Never force-removes a dirty
+   * worktree (a non-`--force` `git worktree remove` refuses when the tree is
+   * modified), so user work is never destroyed — such worktrees are skipped and
+   * reported instead.
    */
   async pruneOrphanedWorktrees(input: PruneOrphanedWorktreesInput): Promise<PruneOrphanedWorktreesResult> {
     const worktreeRoot = await canonicalPath(input.worktreeRoot);
@@ -190,11 +190,6 @@ export class GitWorktreeManager {
         repoRoot = info.repoRoot;
         branchName = info.branchName;
       } catch {
-        skipped.push(candidatePath);
-        continue;
-      }
-
-      if (!branchName?.startsWith("pi/") || !(await isBranchMergedIntoHead(repoRoot, branchName))) {
         skipped.push(candidatePath);
         continue;
       }
@@ -227,15 +222,6 @@ async function deleteAppWorktreeBranch(repoRoot: string, branchName: string | un
     await runGit(["-C", repoRoot, "branch", "-d", branchName]);
   } catch (error) {
     console.warn(`pi-gui: kept branch ${branchName} after worktree removal: ${errorMessage(error)}`);
-  }
-}
-
-async function isBranchMergedIntoHead(repoRoot: string, branchName: string): Promise<boolean> {
-  try {
-    await runGit(["-C", repoRoot, "merge-base", "--is-ancestor", `refs/heads/${branchName}`, "HEAD"]);
-    return true;
-  } catch {
-    return false;
   }
 }
 
@@ -453,6 +439,7 @@ async function runGit(args: readonly string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", [...args], {
     encoding: "utf8",
     maxBuffer: 10 * 1024 * 1024,
+    timeout: 10_000,
   });
   return stdout;
 }

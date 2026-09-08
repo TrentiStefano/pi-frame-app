@@ -18,7 +18,6 @@ export interface ThreadGroup {
   readonly rootWorkspace: WorkspaceRecord;
   readonly pinnedThreads: readonly ThreadListEntry[];
   readonly threads: readonly ThreadListEntry[];
-  readonly archivedThreads: readonly ThreadListEntry[];
 }
 
 export function buildThreadGroups(state: DesktopAppState): readonly ThreadGroup[] {
@@ -114,9 +113,8 @@ function buildOrphanGroup(workspace: WorkspaceRecord): ThreadGroup {
 function partitionThreads(rootWorkspace: WorkspaceRecord, entries: readonly ThreadListEntry[]): ThreadGroup {
   return {
     rootWorkspace,
-    pinnedThreads: entries.filter((entry) => !entry.session.archivedAt && Boolean(entry.session.pinnedAt)),
-    threads: entries.filter((entry) => !entry.session.archivedAt && !entry.session.pinnedAt),
-    archivedThreads: entries.filter((entry) => Boolean(entry.session.archivedAt)),
+    pinnedThreads: entries.filter((entry) => Boolean(entry.session.pinnedAt)),
+    threads: entries.filter((entry) => !entry.session.pinnedAt),
   };
 }
 

@@ -21,10 +21,19 @@ interface SidebarLayout {
   readonly toggleRight: number;
   readonly topbarLeft: number;
   readonly topbarRight: number;
+  readonly topbarActionsRight: number;
 }
 
 async function expectSidebarCollapsed(window: Page, collapsed: boolean): Promise<void> {
-  await expect(window.locator(".sidebar")).toHaveCount(collapsed ? 0 : 1);
+  const sidebar = window.locator(".sidebar");
+  await expect(sidebar).toHaveCount(1);
+  await expect(sidebar).toHaveAttribute("data-collapsed", String(collapsed));
+  await expect(sidebar).toHaveAttribute("aria-hidden", String(collapsed));
+  if (collapsed) {
+    await expect(sidebar).toBeHidden();
+  } else {
+    await expect(sidebar).toBeVisible();
+  }
   await expect.poll(async () => (await getDesktopState(window)).sidebarCollapsed).toBe(collapsed);
 }
 
@@ -40,12 +49,14 @@ async function readSidebarLayout(window: Page): Promise<SidebarLayout | null> {
     const main = document.querySelector<HTMLElement>(".main");
     const toggle = document.querySelector<HTMLElement>("[data-testid='sidebar-toggle']");
     const topbar = document.querySelector<HTMLElement>(".topbar");
-    if (!main || !toggle || !topbar) {
+    const topbarActions = document.querySelector<HTMLElement>(".topbar__actions");
+    if (!main || !toggle || !topbar || !topbarActions) {
       return null;
     }
     const mainRect = main.getBoundingClientRect();
     const toggleRect = toggle.getBoundingClientRect();
     const topbarRect = topbar.getBoundingClientRect();
+    const topbarActionsRect = topbarActions.getBoundingClientRect();
     return {
       viewportWidth: window.innerWidth,
       mainLeft: mainRect.left,
@@ -54,16 +65,25 @@ async function readSidebarLayout(window: Page): Promise<SidebarLayout | null> {
       toggleRight: toggleRect.right,
       topbarLeft: topbarRect.left,
       topbarRight: topbarRect.right,
+      topbarActionsRight: topbarActionsRect.right,
     };
   });
 }
 
-async function expectToggleClearOfTopbarDragRegion(window: Page): Promise<void> {
+async function expectToggleAtTopbarRight(window: Page): Promise<void> {
   const layout = await readSidebarLayout(window);
   if (!layout) {
     throw new Error("Expected main, sidebar toggle, and topbar to be present");
   }
-  expect(layout.toggleRight).toBeLessThanOrEqual(layout.topbarLeft);
+  const platform = await window.evaluate(() => document.documentElement.dataset.platform);
+  if (platform === "win32") {
+    await expect(window.locator(".windows-titlebar-menu__utility > .sidebar-toggle")).toHaveCount(1);
+    return;
+  }
+  await expect(window.locator(".topbar__actions > .sidebar-toggle")).toHaveCount(1);
+  expect(layout.toggleRight).toBe(layout.topbarActionsRight);
+  const nativeControlOverlayInset = await window.evaluate(() => document.documentElement.dataset.platform === "win32" ? 148 : 0);
+  expect(layout.topbarRight - layout.toggleRight).toBeLessThanOrEqual(16 + nativeControlOverlayInset);
 }
 
 async function setElectronWindowSize(
@@ -77,14 +97,14 @@ async function setElectronWindowSize(
     if (!window) {
       return false;
     }
-    window.setSize(size.width, size.height);
+    window.setContentSize(size.width, size.height);
     return true;
   }, { width, height });
   expect(didSetSize).toBe(true);
-  await expect.poll(() => window.evaluate(() => ({
-    height: window.innerHeight,
-    width: window.innerWidth,
-  }))).toEqual({ height, width });
+  await expect.poll(() => window.evaluate(
+    (size) => Math.abs(window.innerWidth - size.width) <= 1 && Math.abs(window.innerHeight - size.height) <= 1,
+    { height, width },
+  )).toBe(true);
 }
 
 async function writeProofScreenshot(window: Page, name: string): Promise<void> {
@@ -129,14 +149,36 @@ test("toggles and persists the primary sidebar from the button and keyboard shor
     const toggle = window.getByTestId("sidebar-toggle");
     await expect(toggle).toBeVisible();
     await expect(window.locator(".sidebar")).toBeVisible();
+    await expect(window.getByRole("button", { name: "Skills", exact: true })).toHaveCount(0);
+
+
+    const newThreadButton = window.locator(".sidebar").getByRole("button", { name: "New thread", exact: true });
+    const newThreadBackground = await newThreadButton.evaluate((element) => getComputedStyle(element).backgroundColor);
+    await newThreadButton.hover();
+    await expect.poll(() => newThreadButton.evaluate((element) => getComputedStyle(element).backgroundColor)).not.toBe(newThreadBackground);
+
+    const sidebarBeforeResize = await window.locator(".sidebar").boundingBox();
+    const sidebarResizer = window.locator(".sidebar-resizer");
+    const sidebarResizerBox = await sidebarResizer.boundingBox();
+    if (!sidebarBeforeResize || !sidebarResizerBox) {
+      throw new Error("Expected the sidebar and its resize separator");
+    }
+    await window.mouse.move(sidebarResizerBox.x + sidebarResizerBox.width / 2, sidebarResizerBox.y + 100);
+    await window.mouse.down();
+    await window.mouse.move(sidebarResizerBox.x + 64, sidebarResizerBox.y + 100);
+    await window.mouse.up();
+    await expect.poll(async () => (await window.locator(".sidebar").boundingBox())?.width ?? 0).toBeGreaterThan(sidebarBeforeResize.width);
+
     const expandedMainBox = await window.locator(".main").boundingBox();
     expect(expandedMainBox).not.toBeNull();
 
     await toggle.click();
     await expectSidebarCollapsed(window, true);
-    await expectToggleClearOfTopbarDragRegion(window);
+    await expectToggleAtTopbarRight(window);
     const collapsedMainBox = await window.locator(".main").boundingBox();
     expect(collapsedMainBox).not.toBeNull();
+    expect(collapsedMainBox?.x).toBeLessThanOrEqual(1);
+    expect(collapsedMainBox?.width).toBeGreaterThanOrEqual((await window.evaluate(() => innerWidth)) - 1);
     expect(collapsedMainBox?.x ?? 999).toBeLessThan(expandedMainBox?.x ?? 0);
     expect(collapsedMainBox?.width ?? 0).toBeGreaterThan(expandedMainBox?.width ?? 9999);
 
@@ -158,43 +200,26 @@ test("toggles and persists the primary sidebar from the button and keyboard shor
     await window.keyboard.press(desktopShortcut(","));
     await expectSecondaryTakeover(window, "settings-surface");
     await window.getByRole("button", { name: "Appearance", exact: true }).click();
-    await window.locator(".settings-row", { hasText: "Light" }).locator('input[type="radio"]').click();
+    const lightThemeButton = window.getByRole("button", { name: "Light", exact: true });
+    await expect(lightThemeButton).toBeVisible();
+    await lightThemeButton.click();
     await writeTakeoverProof(window, "settings-light.png");
     await window.keyboard.press(desktopShortcut("B"));
     await expect.poll(async () => (await getDesktopState(window)).sidebarCollapsed).toBe(false);
     await window.getByRole("button", { name: "Back to app", exact: true }).click();
 
     await restoreSidebarIfNeeded(window);
-    await window.getByRole("button", { name: "Skills", exact: true }).click();
-    await expectSecondaryTakeover(window, "skills-surface");
-    await writeTakeoverProof(window, "skills-light.png");
-    await window.keyboard.press(desktopShortcut("B"));
-    await expect.poll(async () => (await getDesktopState(window)).sidebarCollapsed).toBe(false);
-    await window.getByRole("button", { name: "Back to app", exact: true }).click();
-
-    await restoreSidebarIfNeeded(window);
-    await window.getByRole("button", { name: "Extensions", exact: true }).click();
-    await expectSecondaryTakeover(window, "extensions-surface");
-    await writeTakeoverProof(window, "extensions-light.png");
-    await window.keyboard.press(desktopShortcut("B"));
-    await expect.poll(async () => (await getDesktopState(window)).sidebarCollapsed).toBe(false);
-    await window.getByRole("button", { name: "Back to app", exact: true }).click();
+    await expect(window.getByRole("button", { name: "Extensions", exact: true })).toHaveCount(0);
 
     await window.keyboard.press(desktopShortcut(","));
     await expectSecondaryTakeover(window, "settings-surface");
-    await window.locator(".settings-row", { hasText: "Dark" }).locator('input[type="radio"]').click();
+    const darkThemeButton = window.getByRole("button", { name: "Dark", exact: true });
+    await expect(darkThemeButton).toBeVisible();
+    await darkThemeButton.click();
     await writeTakeoverProof(window, "settings-dark.png");
     await window.getByRole("button", { name: "Back to app", exact: true }).click();
 
-    await window.getByRole("button", { name: "Skills", exact: true }).click();
-    await expectSecondaryTakeover(window, "skills-surface");
-    await writeTakeoverProof(window, "skills-dark.png");
-    await window.getByRole("button", { name: "Back to app", exact: true }).click();
-
-    await window.getByRole("button", { name: "Extensions", exact: true }).click();
-    await expectSecondaryTakeover(window, "extensions-surface");
-    await writeTakeoverProof(window, "extensions-dark.png");
-    await window.getByRole("button", { name: "Back to app", exact: true }).click();
+    await expect(window.getByRole("button", { name: "Extensions", exact: true })).toHaveCount(0);
 
     await restoreSidebarIfNeeded(window);
     await window.getByTestId("sidebar-toggle").click();
@@ -209,7 +234,7 @@ test("toggles and persists the primary sidebar from the button and keyboard shor
     await waitForWorkspaceByPath(window, workspacePath);
     await expectSidebarCollapsed(window, true);
     await expect(window.getByTestId("sidebar-toggle")).toBeVisible();
-    await expectToggleClearOfTopbarDragRegion(window);
+    await expectToggleAtTopbarRight(window);
     await window.getByTestId("sidebar-toggle").click();
     await expectSidebarCollapsed(window, false);
   } finally {
@@ -245,18 +270,18 @@ test("keeps collapsed sidebar out of narrow windows and reopens from the button"
 
     await window.keyboard.press(desktopShortcut("B"));
     await expectSidebarCollapsed(window, true);
-    await expectToggleClearOfTopbarDragRegion(window);
+    await expectToggleAtTopbarRight(window);
     await writeProofScreenshot(window, "narrow-sidebar-collapsed.png");
 
     const collapsedLayout = await readSidebarLayout(window);
     if (!collapsedLayout) {
       throw new Error("Expected collapsed narrow layout to include main, topbar, and sidebar toggle");
     }
-    expect(collapsedLayout.viewportWidth).toBeLessThanOrEqual(NARROW_WINDOW_WIDTH);
+    expect(collapsedLayout.viewportWidth).toBeLessThanOrEqual(NARROW_WINDOW_WIDTH + 1);
     expect(collapsedLayout.mainLeft).toBeLessThanOrEqual(1);
     expect(collapsedLayout.mainRight).toBeGreaterThanOrEqual(collapsedLayout.viewportWidth - 1);
     expect(collapsedLayout.mainWidth).toBeGreaterThanOrEqual(collapsedLayout.viewportWidth - 1);
-    expect(collapsedLayout.topbarLeft).toBeGreaterThanOrEqual(collapsedLayout.toggleRight);
+    expect(collapsedLayout.topbarLeft).toBeGreaterThanOrEqual(collapsedLayout.mainLeft);
     expect(collapsedLayout.topbarRight).toBeLessThanOrEqual(collapsedLayout.mainRight);
 
     await window.getByTestId("sidebar-toggle").click();

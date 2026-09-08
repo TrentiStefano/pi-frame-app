@@ -16,6 +16,15 @@ export function PlusIcon() {
   );
 }
 
+export function MicrophoneIcon() {
+  return (
+    <Icon>
+      <rect x="7" y="3.1" width="6" height="9.2" rx="3" stroke="currentColor" strokeWidth="1.45" />
+      <path d="M4.9 9.5a5.1 5.1 0 0 0 10.2 0M10 14.6v2.3M7.4 16.9h5.2" stroke="currentColor" strokeLinecap="round" strokeWidth="1.45" />
+    </Icon>
+  );
+}
+
 export function TerminalIcon() {
   return (
     <Icon>
@@ -81,27 +90,6 @@ export function ArrowUpIcon() {
   );
 }
 
-export function PiLogoMark() {
-  return (
-    <svg aria-hidden="true" viewBox="0 0 64 64" fill="none">
-      <rect width="64" height="64" rx="18" fill="#1f2638" />
-      <text
-        x="50%"
-        y="54%"
-        textAnchor="middle"
-        dominantBaseline="middle"
-        fontFamily="SF Pro Display, SF Pro Text, ui-sans-serif, system-ui, sans-serif"
-        fontSize="34"
-        fontStyle="italic"
-        fontWeight="700"
-        fill="#ffffff"
-      >
-        π
-      </text>
-    </svg>
-  );
-}
-
 export function StopSquareIcon() {
   return (
     <Icon>
@@ -133,35 +121,6 @@ export function FileIcon() {
         strokeWidth="1.35"
       />
       <path d="M11.7 3.9v2.4h2.3M7.2 9.15h5.6M7.2 11.8h4.2" stroke="currentColor" strokeLinecap="round" strokeWidth="1.35" />
-    </Icon>
-  );
-}
-
-export function ArchiveIcon() {
-  return (
-    <Icon>
-      <path
-        d="M4.1 5.1h11.8l-.8 10.1a1.2 1.2 0 0 1-1.2 1.1H6.1a1.2 1.2 0 0 1-1.2-1.1L4.1 5.1Z"
-        stroke="currentColor"
-        strokeLinejoin="round"
-        strokeWidth="1.35"
-      />
-      <path d="M3.4 4.1h13.2v2.4H3.4zM7.1 9.15h5.8" stroke="currentColor" strokeLinecap="round" strokeWidth="1.35" />
-    </Icon>
-  );
-}
-
-export function RestoreIcon() {
-  return (
-    <Icon>
-      <path
-        d="M4.1 6.15h11.8l-.8 9.05a1.2 1.2 0 0 1-1.2 1.1H6.1a1.2 1.2 0 0 1-1.2-1.1L4.1 6.15Z"
-        stroke="currentColor"
-        strokeLinejoin="round"
-        strokeWidth="1.35"
-      />
-      <path d="M3.4 5.15h13.2v2.1H3.4z" stroke="currentColor" strokeWidth="1.35" />
-      <path d="M10 12.8V8.4m0 0L8.2 10.2M10 8.4l1.8 1.8" stroke="currentColor" strokeLinecap="round" strokeWidth="1.35" />
     </Icon>
   );
 }
@@ -373,21 +332,29 @@ export function GripIcon() {
   );
 }
 
-export function PromptRailIcon() {
-  return (
-    <Icon>
-      <rect x="3.4" y="4.1" width="13.2" height="11.8" rx="2.2" stroke="currentColor" strokeWidth="1.35" />
-      <path d="M12.6 4.2v11.6" stroke="currentColor" strokeWidth="1.35" />
-      <path d="M13.75 7.4h1.55M13.75 10h1.55M13.75 12.6h1.55" stroke="currentColor" strokeLinecap="round" strokeWidth="1.2" />
-    </Icon>
-  );
-}
-
 export function DiffIcon() {
   return (
     <Icon>
       <path d="M7 7h6M7 10h4M7 13h5" stroke="currentColor" strokeLinecap="round" strokeWidth="1.3" />
       <rect x="4" y="4" width="12" height="12" rx="2" stroke="currentColor" strokeWidth="1.3" fill="none" />
+    </Icon>
+  );
+}
+
+export function CoinsIcon() {
+  return (
+    <Icon>
+      <circle cx="8" cy="8" r="4.5" stroke="currentColor" strokeWidth="1.35" />
+      <path d="M9.5 5.5a4.5 4.5 0 0 1 2.5 6.5M12 7.5a4.5 4.5 0 0 1 2 4.5" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
+    </Icon>
+  );
+}
+
+export function MeterIcon() {
+  return (
+    <Icon>
+      <path d="M4 14.5a7 7 0 1 1 12 0" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
+      <path d="M10 11.5l2.5-3.5" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
     </Icon>
   );
 }

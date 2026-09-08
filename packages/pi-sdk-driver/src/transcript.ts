@@ -13,17 +13,63 @@ export interface SessionTranscriptFileAttachment {
   readonly sizeBytes?: number;
 }
 
-export type SessionTranscriptAttachment = SessionTranscriptImageAttachment | SessionTranscriptFileAttachment;
+export interface SessionTranscriptBrowserElementAttachment {
+  readonly kind: "browser-element";
+  readonly id: string;
+  readonly name: string;
+  readonly tabId: string;
+  readonly capturedAt: string;
+  readonly page: { readonly url: string; readonly title: string; readonly revision: number };
+  readonly frameUrl: string;
+  readonly element: {
+    readonly tag: string;
+    readonly role?: string;
+    readonly accessibleName?: string;
+    readonly text?: string;
+    readonly attributes: Readonly<Record<string, string>>;
+    readonly locator: {
+      readonly kind: "role" | "test-id" | "label" | "text" | "id" | "css";
+      readonly value: string;
+      readonly unique: boolean;
+    };
+    readonly cssFallback?: string;
+    readonly ancestors: readonly { readonly tag: string; readonly role?: string; readonly name?: string }[];
+  };
+}
+
+export type SessionTranscriptAttachment =
+  | SessionTranscriptImageAttachment
+  | SessionTranscriptFileAttachment
+  | SessionTranscriptBrowserElementAttachment;
 
 export type SessionTranscriptRole = "user" | "assistant" | "branchSummary" | "compactionSummary";
+
+export interface SessionMessageUsage {
+  readonly input?: number;
+  readonly output?: number;
+  readonly cacheRead?: number;
+  readonly cacheWrite?: number;
+  readonly totalTokens?: number;
+  readonly cost?: {
+    readonly input?: number;
+    readonly output?: number;
+    readonly cacheRead?: number;
+    readonly cacheWrite?: number;
+    readonly total?: number;
+  };
+}
 
 export interface SessionTranscriptMessage {
   readonly kind: "message";
   readonly role: SessionTranscriptRole;
   readonly text: string;
+  readonly thinking?: string;
   readonly attachments?: readonly SessionTranscriptAttachment[];
   readonly createdAt: string;
   readonly id: string;
+  readonly usage?: SessionMessageUsage;
+  readonly model?: string;
+  readonly provider?: string;
 }
 
 export interface SessionTranscriptToolCall {
@@ -35,6 +81,7 @@ export interface SessionTranscriptToolCall {
   readonly status: "success" | "error";
   readonly input?: unknown;
   readonly output?: unknown;
+  readonly usage?: SessionMessageUsage;
   readonly createdAt: string;
 }
 

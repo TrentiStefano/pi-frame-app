@@ -37,7 +37,7 @@ export const TitleCard: React.FC = () => {
           letterSpacing: -1,
         }}
       >
-        pi desktop
+        pi-frame
       </div>
       <div
         style={{
@@ -50,7 +50,7 @@ export const TitleCard: React.FC = () => {
           letterSpacing: 0.5,
         }}
       >
-        a codex-style desktop app for ai-assisted coding
+        a Codex-style desktop app for the pi coding agent
       </div>
     </AbsoluteFill>
   );

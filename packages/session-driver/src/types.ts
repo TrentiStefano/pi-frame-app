@@ -55,7 +55,35 @@ export interface SessionFileAttachment {
   readonly sizeBytes?: number;
 }
 
-export type SessionAttachment = SessionImageAttachment | SessionFileAttachment;
+export interface SessionBrowserElementAttachment {
+  readonly kind: "browser-element";
+  readonly id: string;
+  readonly name: string;
+  readonly tabId: string;
+  readonly capturedAt: Timestamp;
+  readonly page: {
+    readonly url: string;
+    readonly title: string;
+    readonly revision: number;
+  };
+  readonly frameUrl: string;
+  readonly element: {
+    readonly tag: string;
+    readonly role?: string;
+    readonly accessibleName?: string;
+    readonly text?: string;
+    readonly attributes: Readonly<Record<string, string>>;
+    readonly locator: {
+      readonly kind: "role" | "test-id" | "label" | "text" | "id" | "css";
+      readonly value: string;
+      readonly unique: boolean;
+    };
+    readonly cssFallback?: string;
+    readonly ancestors: readonly { readonly tag: string; readonly role?: string; readonly name?: string }[];
+  };
+}
+
+export type SessionAttachment = SessionImageAttachment | SessionFileAttachment | SessionBrowserElementAttachment;
 
 export interface SessionConfig {
   readonly provider?: string;
@@ -186,6 +214,7 @@ export interface ToolUpdatedEvent extends SessionEventBase {
   readonly callId: string;
   readonly text?: string;
   readonly progress?: number;
+  readonly details?: unknown;
 }
 
 export interface ToolFinishedEvent extends SessionEventBase {
@@ -337,6 +366,7 @@ export interface SessionDriver {
   openSession(sessionRef: SessionRef): Promise<SessionSnapshot>;
   archiveSession(sessionRef: SessionRef): Promise<void>;
   unarchiveSession(sessionRef: SessionRef): Promise<void>;
+  deleteSession(sessionRef: SessionRef): Promise<void>;
   sendUserMessage(sessionRef: SessionRef, input: SessionMessageInput): Promise<void>;
   replaceQueuedMessages(sessionRef: SessionRef, messages: readonly SessionQueuedMessage[]): Promise<void>;
   cancelCurrentRun(sessionRef: SessionRef): Promise<void>;

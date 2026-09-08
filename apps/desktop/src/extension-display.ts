@@ -1,4 +1,4 @@
-import type { RuntimeExtensionRecord } from "@pi-gui/session-driver/runtime-types";
+import type { RuntimeExtensionRecord } from "@pi-frame/session-driver/runtime-types";
 
 export function extensionSourceSummary(extension: RuntimeExtensionRecord): string {
   return `${extensionScopeLabel(extension)} · ${extension.sourceInfo.origin}`;

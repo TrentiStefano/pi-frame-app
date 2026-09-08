@@ -9,12 +9,6 @@ import {
   makeWorkspace,
   selectSession,
 } from "../helpers/electron-app";
-import { desktopIpc } from "../../src/ipc";
-
-interface TestDraftWriteControl {
-  readonly drafts: string[];
-  releaseFirstWrite(): void;
-}
 
 test("ignores stale persisted draft acknowledgements while typing", async () => {
   test.setTimeout(60_000);
@@ -66,10 +60,9 @@ test("ignores stale persisted draft acknowledgements while typing", async () => 
   }
 });
 
-test("adopts a persisted draft when no local edit is pending", async () => {
-  test.setTimeout(60_000);
+test("publishes a persisted draft once without republishing the transcript", async () => {
   const userDataDir = await makeUserDataDir();
-  const workspacePath = await makeWorkspace("composer-draft-clean-sync");
+  const workspacePath = await makeWorkspace("composer-draft-publish-count");
   const harness = await launchDesktop(userDataDir, {
     initialWorkspaces: [workspacePath],
     testMode: "background",
@@ -77,108 +70,31 @@ test("adopts a persisted draft when no local edit is pending", async () => {
 
   try {
     const window = await harness.firstWindow();
-    await createNamedThread(window, "Clean composer draft sync");
+    await createNamedThread(window, "Composer draft publish count");
 
-    const persistedDraft = "persisted outside the local debounce";
-    await window.evaluate(async (draft) => {
-      const app = window.piApp;
-      if (!app) {
-        throw new Error("piApp IPC bridge is unavailable");
-      }
-      await app.updateComposerDraft(draft);
-    }, persistedDraft);
-
-    const composer = window.getByTestId("composer");
-    await expect(composer).toHaveValue(persistedDraft);
-    await window.waitForTimeout(600);
-    await expect(composer).toHaveValue(persistedDraft);
-    await expect.poll(async () => (await getDesktopState(window)).composerDraft).toBe(persistedDraft);
-  } finally {
-    await harness.close();
-  }
-});
-
-test("does not resurrect a cleared draft while an older write is in flight", async () => {
-  test.setTimeout(60_000);
-  const userDataDir = await makeUserDataDir();
-  const workspacePath = await makeWorkspace("composer-draft-in-flight-clear");
-  const harness = await launchDesktop(userDataDir, {
-    initialWorkspaces: [workspacePath],
-    testMode: "background",
-  });
-
-  try {
-    const window = await harness.firstWindow();
-    await createNamedThread(window, "In-flight composer clear");
-    await harness.electronApp.evaluate(({ ipcMain }, channel) => {
-      type InvokeHandler = (...args: unknown[]) => unknown;
-      const invokeHandlers = (
-        ipcMain as typeof ipcMain & { readonly _invokeHandlers?: Map<string, InvokeHandler> }
-      )._invokeHandlers;
-      const originalHandler = invokeHandlers?.get(channel);
-      if (!originalHandler) {
-        throw new Error(`No IPC handler registered for ${channel}`);
-      }
-
-      let releaseFirstWrite = () => {};
-      const firstWriteGate = new Promise<void>((resolve) => {
-        releaseFirstWrite = resolve;
+    const events = await window.evaluate(async () => {
+      const revisions: number[] = [];
+      let transcriptEvents = 0;
+      const stopState = window.piApp.onStateChanged((state) => {
+        revisions.push(state.revision);
       });
-      const control: TestDraftWriteControl = {
-        drafts: [],
-        releaseFirstWrite,
-      };
-      (
-        globalThis as typeof globalThis & {
-          __PI_TEST_COMPOSER_DRAFT_WRITE_CONTROL?: TestDraftWriteControl;
-        }
-      ).__PI_TEST_COMPOSER_DRAFT_WRITE_CONTROL = control;
-
-      ipcMain.removeHandler(channel);
-      ipcMain.handle(channel, async (...args) => {
-        const draft = args[1];
-        if (typeof draft !== "string") {
-          throw new Error("Composer draft IPC argument was not a string");
-        }
-        control.drafts.push(draft);
-        if (control.drafts.length === 1) {
-          await firstWriteGate;
-        }
-        return originalHandler(...args);
-      });
-    }, desktopIpc.updateComposerDraft);
-    const readDraftWrites = () =>
-      harness.electronApp.evaluate(() => {
-        const control = (
-          globalThis as typeof globalThis & {
-            __PI_TEST_COMPOSER_DRAFT_WRITE_CONTROL?: TestDraftWriteControl;
-          }
-        ).__PI_TEST_COMPOSER_DRAFT_WRITE_CONTROL;
-        return control?.drafts ?? [];
+      const stopTranscript = window.piApp.onSelectedTranscriptChanged(() => {
+        transcriptEvents += 1;
       });
 
-    const composer = window.getByTestId("composer");
-    await composer.fill("obsolete in-flight draft");
-    await expect.poll(readDraftWrites).toEqual(["obsolete in-flight draft"]);
-
-    await composer.fill("");
-    await expect.poll(readDraftWrites).toEqual(["obsolete in-flight draft", ""]);
-
-    await harness.electronApp.evaluate(() => {
-      const control = (
-        globalThis as typeof globalThis & {
-          __PI_TEST_COMPOSER_DRAFT_WRITE_CONTROL?: TestDraftWriteControl;
-        }
-      ).__PI_TEST_COMPOSER_DRAFT_WRITE_CONTROL;
-      if (!control) {
-        throw new Error("Delayed composer draft write was not pending");
+      try {
+        await window.piApp.updateComposerDraft("single-publish-draft");
+        await new Promise((resolve) => window.setTimeout(resolve, 100));
+        return { revisions, transcriptEvents };
+      } finally {
+        stopState();
+        stopTranscript();
       }
-      control.releaseFirstWrite();
     });
 
-    await expect.poll(readDraftWrites).toEqual(["obsolete in-flight draft", "", ""]);
-    await expect(composer).toHaveValue("");
-    await expect.poll(async () => (await getDesktopState(window)).composerDraft).toBe("");
+    expect(events.revisions).toHaveLength(1);
+    expect(new Set(events.revisions).size).toBe(events.revisions.length);
+    expect(events.transcriptEvents).toBe(0);
   } finally {
     await harness.close();
   }

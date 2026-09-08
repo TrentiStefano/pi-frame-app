@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import type { SessionDriverEvent, SessionRef } from "@pi-gui/session-driver";
+import type { SessionDriverEvent, SessionRef } from "@pi-frame/session-driver";
 import {
   clickSession,
   createNamedThread,

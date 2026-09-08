@@ -1,4 +1,4 @@
-import { sessionKey } from "@pi-gui/pi-sdk-driver";
+import { sessionKey } from "@pi-frame/pi-sdk-driver";
 import type { CreateSessionInput, DesktopAppState, WorkspaceSessionTarget } from "../src/desktop-state";
 import { toSessionRef } from "./app-store-utils";
 import type { AppStoreInternals, RefreshStateOptions } from "./app-store-internals";
@@ -160,11 +160,14 @@ export async function archiveSession(
     store.sessionState.pinnedAtBySession.delete(key);
     store.sessionState.pinnedSessionOrder = store.sessionState.pinnedSessionOrder.filter((entry) => entry !== key);
     await store.driver.archiveSession(sessionRef);
-    return store.refreshState(selectionAfterArchiving(store.state, target));
+    return store.refreshState(selectionAfterSessionLeavesActiveList(store.state, target));
   });
 }
 
-function selectionAfterArchiving(state: DesktopAppState, target: WorkspaceSessionTarget): RefreshStateOptions {
+function selectionAfterSessionLeavesActiveList(
+  state: DesktopAppState,
+  target: WorkspaceSessionTarget,
+): RefreshStateOptions {
   if (state.selectedWorkspaceId !== target.workspaceId || state.selectedSessionId !== target.sessionId) {
     return {
       selectedWorkspaceId: state.selectedWorkspaceId,
@@ -231,6 +234,26 @@ export async function unarchiveSession(
       clearLastError: true,
       activeView: "threads",
     });
+  });
+}
+
+export async function deleteSession(
+  store: AppStoreInternals,
+  target: WorkspaceSessionTarget,
+): Promise<DesktopAppState> {
+  await store.initialize();
+
+  return store.withErrorHandling(async () => {
+    const sessionRef = toSessionRef(target);
+    if (!store.sessionFromState(sessionRef)) {
+      return store.withError(`Unknown session: ${target.workspaceId}:${target.sessionId}`);
+    }
+    const key = sessionKey(sessionRef);
+    store.clearPendingAutoTitle(sessionRef);
+    await store.cancelPendingDialogsForSession(sessionRef);
+    await store.driver.deleteSession(sessionRef);
+    await store.attachmentStore.remove(key);
+    return store.refreshState(selectionAfterSessionLeavesActiveList(store.state, target));
   });
 }
 

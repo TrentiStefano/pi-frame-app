@@ -1,9 +1,9 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test } from "@playwright/test";
-import { createNamedThread, launchDesktop, makeUserDataDir, makeWorkspace } from "../helpers/electron-app";
+import { createNamedThread, getDesktopState, launchDesktop, makeUserDataDir, makeWorkspace } from "../helpers/electron-app";
 
-test("shows skills and settings surfaces from runtime data", async () => {
+test("configures discovered skill commands from settings", async () => {
   test.setTimeout(60_000);
   const userDataDir = await makeUserDataDir();
   const workspacePath = await makeWorkspace("skills-settings-workspace");
@@ -31,16 +31,6 @@ Use this skill when the user wants a short demo workflow.
     const window = await harness.firstWindow();
     await createNamedThread(window, "Skill test session");
 
-    await window.getByRole("button", { name: "Skills", exact: true }).click();
-    await expect(window.locator(".skills-view")).toBeVisible();
-    await expect(window.getByTestId("skills-list")).toContainText("Demo Skill");
-    await window.getByRole("button", { name: /Demo Skill/i }).click();
-    await expect(window.locator(".skill-detail")).toContainText("/skill:demo-skill");
-
-    await window.getByRole("button", { name: "Try", exact: true }).click();
-    await expect(window.getByRole("button", { name: "Threads", exact: true })).toBeVisible();
-    await expect(window.getByTestId("composer")).toHaveValue("/skill:demo-skill ");
-
     await window.getByRole("button", { name: "Settings", exact: true }).click();
     await expect(window.locator(".settings-view")).toBeVisible();
     await expect(window.getByText("Notifications", { exact: true })).toBeVisible();
@@ -64,6 +54,59 @@ Use this skill when the user wants a short demo workflow.
     await expect(slashMenu).toContainText("Demo Skill");
   } finally {
     await harness.close();
+  }
+});
+
+test("keeps Computer Use disabled by default and persists the opt-in toggle", async () => {
+  test.setTimeout(60_000);
+  const userDataDir = await makeUserDataDir();
+  const workspacePath = await makeWorkspace("computer-use-settings-workspace");
+  const firstRun = await launchDesktop(userDataDir, {
+    initialWorkspaces: [workspacePath],
+    testMode: "background",
+  });
+
+  try {
+    const window = await firstRun.firstWindow();
+    await createNamedThread(window, "Computer Use settings session");
+    await window.getByRole("button", { name: "Settings", exact: true }).click();
+    const toggle = window.getByRole("checkbox", { name: "Enable Computer Use" });
+    await expect(toggle).toBeVisible();
+    await expect(toggle).not.toBeChecked();
+    const before = await getDesktopState(window);
+    const sessionKey = `${before.selectedWorkspaceId}:${before.selectedSessionId}`;
+    await expect
+      .poll(async () => (await getDesktopState(window)).sessionCommandsBySession[sessionKey]?.some((command) => command.name === "computer-use") ?? false)
+      .toBe(false);
+    await toggle.click();
+    await expect(toggle).toBeChecked();
+    if (process.platform === "win32" || process.platform === "darwin") {
+      await expect
+        .poll(async () => (await getDesktopState(window)).sessionCommandsBySession[sessionKey]?.some((command) => command.name === "computer-use") ?? false)
+        .toBe(true);
+      await toggle.click();
+      await expect(toggle).not.toBeChecked();
+      await expect
+        .poll(async () => (await getDesktopState(window)).sessionCommandsBySession[sessionKey]?.some((command) => command.name === "computer-use") ?? false)
+        .toBe(false);
+      await toggle.click();
+      await expect(toggle).toBeChecked();
+    }
+  } finally {
+    await firstRun.close();
+  }
+
+  const secondRun = await launchDesktop(userDataDir, {
+    initialWorkspaces: [workspacePath],
+    testMode: "background",
+  });
+  try {
+    const window = await secondRun.firstWindow();
+    await createNamedThread(window, "Computer Use settings restored session");
+    await window.getByRole("button", { name: "Settings", exact: true }).click();
+    await expect(window.getByRole("checkbox", { name: "Enable Computer Use" })).toBeChecked();
+  } finally {
+    await secondRun.close();
   }
 });
 

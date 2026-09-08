@@ -7,36 +7,40 @@ const desktopDir = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(desktopDir, "..", "..");
 const rawArgs = process.argv.slice(2);
 const extraArgs = rawArgs[0] === "--" ? rawArgs.slice(1) : rawArgs;
-const packageFilters = ["@pi-gui/session-driver", "@pi-gui/pi-sdk-driver", "@pi-gui/catalogs"];
+
+// pnpm uses package filters to identify workspace packages
+const packageFilters = ["@pi-frame/session-driver", "@pi-frame/pi-sdk-driver", "@pi-frame/catalogs"];
+
+const pnpmCommand = process.platform === "win32" ? path.resolve(repoRoot, "tools", "pnpm.cmd") : "pnpm";
 
 async function main() {
   await run(
-    "pnpm",
+    pnpmCommand,
     ["--dir", repoRoot, "--filter", packageFilters[0], "--filter", packageFilters[1], "--filter", packageFilters[2], "run", "build"],
     desktopDir,
   );
 
   const children = [
-    start(
-      "pnpm",
-      [
-        "--dir",
-        repoRoot,
-        "--parallel",
-        "--filter",
-        packageFilters[0],
-        "--filter",
-        packageFilters[1],
-        "--filter",
-        packageFilters[2],
-        "run",
-        "build",
-        "--watch",
-      ],
-      desktopDir,
-    ),
-    start("pnpm", ["exec", "electron-vite", "dev", "--watch", ...extraArgs], desktopDir),
-  ];
+        start(
+          pnpmCommand,
+          [
+            "--dir",
+            repoRoot,
+            "--parallel",
+            "--filter",
+            packageFilters[0],
+            "--filter",
+            packageFilters[1],
+            "--filter",
+            packageFilters[2],
+            "run",
+            "build",
+            "--watch",
+          ],
+          desktopDir,
+        ),
+        start(pnpmCommand, ["exec", "electron-vite", "dev", "--watch", ...extraArgs], desktopDir),
+      ];
 
   let exiting = false;
   const stopChildren = () => {

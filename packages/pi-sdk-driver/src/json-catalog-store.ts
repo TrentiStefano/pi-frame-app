@@ -13,7 +13,7 @@ import type {
   WorktreeCatalogEntry,
   WorktreeCatalogSnapshot,
   WorktreeId,
-} from "@pi-gui/catalogs";
+} from "@pi-frame/catalogs";
 import { sessionKey } from "./session-supervisor-utils.js";
 
 type CatalogFileState = {
@@ -28,21 +28,19 @@ type ParsedCatalogFileState = Partial<Omit<CatalogFileState, "version">> & {
   version?: 1 | 2;
 };
 
-interface CatalogFileCoordinator {
-  mutationQueue: Promise<void>;
-  generation: number;
-}
-
-const coordinatorsByPath = new Map<string, CatalogFileCoordinator>();
+export type JsonCatalogStoreWriter = (filePath: string, value: unknown) => Promise<void>;
 
 export interface JsonCatalogStoreOptions {
   readonly catalogFilePath?: string;
+  /** Narrow, content-safe seam for measuring or fault-injecting physical writes. */
+  readonly writer?: JsonCatalogStoreWriter;
 }
 
 export interface SessionFileCatalogStorage extends CatalogStorage {
   getSessionFile(sessionRef: SessionRef): Promise<string | undefined>;
   setSessionFile(sessionRef: SessionRef, sessionFile: string): Promise<void>;
   deleteSessionFile(sessionRef: SessionRef): Promise<void>;
+  flushPersistence(): Promise<void>;
   replaceWorkspaceSessions(
     workspaceId: WorkspaceId,
     entries: readonly SessionCatalogEntry[],
@@ -52,15 +50,14 @@ export interface SessionFileCatalogStorage extends CatalogStorage {
 
 export class JsonCatalogStore implements SessionFileCatalogStorage {
   private readonly filePath: string;
-  private readonly coordinator: CatalogFileCoordinator;
   private state: CatalogFileState | undefined;
-  private stateGeneration = -1;
-  private loadPromise: Promise<CatalogFileState> | undefined;
-  private loadGeneration = -1;
+  private loadPromise: Promise<void> | undefined;
+  private writeQueue: Promise<void> = Promise.resolve();
+  private readonly writer: JsonCatalogStoreWriter;
 
   constructor(options: JsonCatalogStoreOptions = {}) {
     this.filePath = options.catalogFilePath ? resolve(options.catalogFilePath) : defaultCatalogFilePath();
-    this.coordinator = coordinatorForPath(this.filePath);
+    this.writer = options.writer ?? writeJsonFileAtomic;
   }
 
   readonly workspaces = {
@@ -174,6 +171,9 @@ export class JsonCatalogStore implements SessionFileCatalogStorage {
         } else {
           state.sessions.push(next);
         }
+        if (entry.sessionFilePath !== undefined) {
+          state.sessionFiles[sessionKey(entry.sessionRef)] = entry.sessionFilePath;
+        }
       });
     },
     deleteSession: async (sessionRef: SessionRef): Promise<void> => {
@@ -192,13 +192,28 @@ export class JsonCatalogStore implements SessionFileCatalogStorage {
 
   async setSessionFile(sessionRef: SessionRef, sessionFile: string): Promise<void> {
     await this.mutateState((state) => {
-      state.sessionFiles[sessionKey(sessionRef)] = sessionFile;
+      const key = sessionKey(sessionRef);
+      const entry = state.sessions.find((session) => sessionKey(session.sessionRef) === key);
+      if (entry) {
+        entry.sessionFilePath = sessionFile;
+      }
+      state.sessionFiles[key] = sessionFile;
     });
+  }
+
+  /** Wait for all catalog writes already queued by this shared owner. */
+  async flushPersistence(): Promise<void> {
+    await this.writeQueue;
   }
 
   async deleteSessionFile(sessionRef: SessionRef): Promise<void> {
     await this.mutateState((state) => {
-      delete state.sessionFiles[sessionKey(sessionRef)];
+      const key = sessionKey(sessionRef);
+      const entry = state.sessions.find((session) => sessionKey(session.sessionRef) === key);
+      if (entry) {
+        delete entry.sessionFilePath;
+      }
+      delete state.sessionFiles[key];
     });
   }
 
@@ -229,92 +244,77 @@ export class JsonCatalogStore implements SessionFileCatalogStorage {
   }
 
   private async getState(): Promise<CatalogFileState> {
-    const generation = this.coordinator.generation;
-    if (this.state && this.stateGeneration === generation) {
+    if (this.state) {
       return this.state;
     }
-    if (!this.loadPromise || this.loadGeneration !== generation) {
+    if (!this.loadPromise) {
       this.loadPromise = this.loadState();
-      this.loadGeneration = generation;
     }
-    const loadPromise = this.loadPromise;
-    try {
-      const state = await loadPromise;
-      if (this.loadPromise === loadPromise && this.coordinator.generation === generation) {
-        this.cacheState(state, generation);
-      }
-      return state;
-    } catch (error) {
-      if (this.loadPromise === loadPromise) {
-        this.clearStateCache();
-      }
-      throw error;
+    await this.loadPromise;
+    if (!this.state) {
+      this.state = createEmptyState();
     }
+    return this.state;
   }
 
-  private async loadState(): Promise<CatalogFileState> {
+  private async loadState(): Promise<void> {
     try {
       const raw = await readFile(this.filePath, "utf8");
-      return parseState(raw, this.filePath);
+      this.state = parseState(raw, this.filePath);
     } catch (error) {
       if (isMissingFileError(error)) {
-        return createEmptyState();
+        this.state = createEmptyState();
+        return;
       }
       throw error;
     }
   }
 
   private async mutateState(mutator: (state: CatalogFileState) => void | false): Promise<void> {
-    const operation = this.coordinator.mutationQueue.then(async () => {
-      this.clearStateCache();
-      const nextState = await this.loadState();
-      if (mutator(nextState) === false) {
-        this.cacheState(nextState, this.coordinator.generation);
-        return;
-      }
-      await writeJsonFileAtomic(this.filePath, nextState);
-      this.coordinator.generation += 1;
-      this.cacheState(nextState, this.coordinator.generation);
+    const state = await this.getState();
+    if (mutator(state) === false) {
+      return;
+    }
+    await this.persistState(state);
+  }
+
+  private async persistState(state: CatalogFileState): Promise<void> {
+    // Capture the mutation boundary before queueing. `state` remains live and
+    // is mutated by later catalog operations while a physical writer may be
+    // blocked; handing it directly to the writer would make an earlier write
+    // observe later state. Freeze the JSON-shaped snapshot as an additional
+    // guard against writer-side mutation.
+    const snapshot = freezeSerializedSnapshot(state);
+    const operation = this.writeQueue.then(async () => {
+      await this.writer(this.filePath, snapshot);
     });
 
-    this.coordinator.mutationQueue = operation.then(
+    this.writeQueue = operation.then(
       () => undefined,
       () => undefined,
     );
 
     await operation;
   }
-
-  private cacheState(state: CatalogFileState, generation: number): void {
-    this.state = state;
-    this.stateGeneration = generation;
-    this.loadPromise = undefined;
-    this.loadGeneration = -1;
-  }
-
-  private clearStateCache(): void {
-    this.state = undefined;
-    this.stateGeneration = -1;
-    this.loadPromise = undefined;
-    this.loadGeneration = -1;
-  }
-}
-
-function coordinatorForPath(filePath: string): CatalogFileCoordinator {
-  const existing = coordinatorsByPath.get(filePath);
-  if (existing) {
-    return existing;
-  }
-  const coordinator: CatalogFileCoordinator = {
-    mutationQueue: Promise.resolve(),
-    generation: 0,
-  };
-  coordinatorsByPath.set(filePath, coordinator);
-  return coordinator;
 }
 
 function defaultCatalogFilePath(): string {
   return join(homedir(), ".pi-gui", "catalogs.json");
+}
+
+function freezeSerializedSnapshot<T>(value: T): T {
+  const snapshot = JSON.parse(JSON.stringify(value)) as T;
+  return deepFreeze(snapshot);
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value as Record<string, unknown>)) {
+      deepFreeze(child);
+    }
+  }
+  return value;
 }
 
 function createEmptyState(): CatalogFileState {
@@ -418,8 +418,14 @@ function cloneWorkspaceEntry(entry: WorkspaceCatalogEntry): WorkspaceCatalogEntr
 
 function cloneSessionEntry(entry: SessionCatalogEntry): SessionCatalogEntry {
   return {
-    ...entry,
     sessionRef: { ...entry.sessionRef },
+    workspaceId: entry.workspaceId,
+    title: entry.title,
+    updatedAt: entry.updatedAt,
+    status: entry.status,
+    ...(entry.archivedAt !== undefined ? { archivedAt: entry.archivedAt } : {}),
+    ...(entry.previewSnippet !== undefined ? { previewSnippet: entry.previewSnippet } : {}),
+    ...(entry.sessionFilePath !== undefined ? { sessionFilePath: entry.sessionFilePath } : {}),
   };
 }
 

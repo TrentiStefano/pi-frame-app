@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState, type Dispatch, type MouseEvent as ReactMouseEvent, type RefObject, type SetStateAction } from "react";
 import type { DesktopAppState, WorkspaceRecord, WorktreeRecord } from "../desktop-state";
 import type { PiDesktopApi } from "../ipc";
+import { APP_DISPLAY_NAME } from "../branding";
+import { useTranslation } from "react-i18next";
 
 interface UseWorkspaceMenuParams {
   readonly api: PiDesktopApi | undefined;
+  readonly snapshot?: DesktopAppState | null;
   readonly setSnapshot: Dispatch<SetStateAction<DesktopAppState | null>>;
   readonly updateSnapshot: (
     api: PiDesktopApi,
@@ -17,7 +20,6 @@ export interface WorkspaceMenuState {
   readonly workspaceRenameId: string | null;
   readonly workspaceRenameDraft: string;
   readonly setWorkspaceRenameDraft: Dispatch<SetStateAction<string>>;
-  readonly expandedArchivedByWorkspace: Record<string, boolean>;
   readonly collapsedWorkspaces: Record<string, boolean>;
   readonly environmentMenuOpen: boolean;
   readonly setEnvironmentMenuOpen: Dispatch<SetStateAction<boolean>>;
@@ -31,7 +33,6 @@ export interface WorkspaceMenuState {
   readonly submitRename: (workspace: WorkspaceRecord) => void;
   readonly cancelRename: () => void;
   readonly removeWorkspace: (workspace: WorkspaceRecord) => void;
-  readonly toggleArchived: (workspaceId: string, open: boolean) => void;
   readonly toggleWorkspaceCollapsed: (workspaceId: string) => void;
   readonly expandWorkspace: (workspaceId: string) => void;
   readonly createWorktree: (workspaceId: string, fromSessionWorkspaceId?: string, fromSessionId?: string) => void;
@@ -40,15 +41,60 @@ export interface WorkspaceMenuState {
   readonly runWorkspaceMenuAction: (event: ReactMouseEvent<HTMLElement>, action: () => void) => void;
 }
 
+const COLLAPSED_WORKSPACES_STORAGE_KEY = "pi-frame:collapsed-workspaces";
+
+function loadInitialCollapsedWorkspaces(): Record<string, boolean> {
+  try {
+    const raw = globalThis.localStorage?.getItem(COLLAPSED_WORKSPACES_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, boolean>;
+    }
+    if (Array.isArray(parsed)) {
+      const result: Record<string, boolean> = {};
+      for (const id of parsed) {
+        if (typeof id === "string") result[id] = true;
+      }
+      return result;
+    }
+  } catch {
+    // Ignore storage/parse errors
+  }
+  return {};
+}
+
+function saveCollapsedWorkspacesToStorage(map: Record<string, boolean>): void {
+  try {
+    globalThis.localStorage?.setItem(COLLAPSED_WORKSPACES_STORAGE_KEY, JSON.stringify(map));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 export function useWorkspaceMenu(params: UseWorkspaceMenuParams): WorkspaceMenuState {
-  const { api, setSnapshot, updateSnapshot } = params;
+  const { t } = useTranslation();
+  const { api, snapshot, setSnapshot, updateSnapshot } = params;
 
   const [workspaceMenuId, setWorkspaceMenuId] = useState<string | null>(null);
   const [workspaceRenameId, setWorkspaceRenameId] = useState<string | null>(null);
   const [workspaceRenameDraft, setWorkspaceRenameDraft] = useState("");
-  const [expandedArchivedByWorkspace, setExpandedArchivedByWorkspace] = useState<Record<string, boolean>>({});
-  const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Record<string, boolean>>({});
+  const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Record<string, boolean>>(() =>
+    loadInitialCollapsedWorkspaces(),
+  );
   const [environmentMenuOpen, setEnvironmentMenuOpen] = useState(false);
+
+  useEffect(() => {
+    if (!snapshot?.collapsedWorkspaceIds) {
+      return;
+    }
+    const next: Record<string, boolean> = {};
+    for (const id of snapshot.collapsedWorkspaceIds) {
+      next[id] = true;
+    }
+    setCollapsedWorkspaces(next);
+    saveCollapsedWorkspacesToStorage(next);
+  }, [snapshot?.collapsedWorkspaceIds]);
 
   const workspaceMenuWrapRef = useRef<HTMLSpanElement | null>(null);
   const workspaceRenamePanelRef = useRef<HTMLFormElement | null>(null);
@@ -134,7 +180,7 @@ export function useWorkspaceMenu(params: UseWorkspaceMenuParams): WorkspaceMenuS
   };
 
   const removeWorkspace = (workspace: WorkspaceRecord) => {
-    const confirmed = window.confirm(`Remove ${workspace.name} from pi-gui? This will not delete any files.`);
+    const confirmed = window.confirm(t("sidebar.removeWorkspaceConfirmation", { name: workspace.name, appName: APP_DISPLAY_NAME }));
     setWorkspaceMenuId(null);
     setWorkspaceRenameId(null);
     if (!confirmed || !api) {
@@ -143,19 +189,34 @@ export function useWorkspaceMenu(params: UseWorkspaceMenuParams): WorkspaceMenuS
     void updateSnapshot(api, setSnapshot, () => api.removeWorkspace(workspace.id));
   };
 
-  const toggleArchived = (workspaceId: string, open: boolean) => {
-    setExpandedArchivedByWorkspace((current) => ({ ...current, [workspaceId]: open }));
-  };
-
   const toggleWorkspaceCollapsed = (workspaceId: string) => {
-    setCollapsedWorkspaces((current) => ({ ...current, [workspaceId]: !current[workspaceId] }));
+    const nextCollapsed = !collapsedWorkspaces[workspaceId];
+    setCollapsedWorkspaces((current) => {
+      const next = { ...current, [workspaceId]: nextCollapsed };
+      saveCollapsedWorkspacesToStorage(next);
+      return next;
+    });
+    if (api) {
+      void updateSnapshot(api, setSnapshot, () =>
+        api.setWorkspaceCollapsed(workspaceId, nextCollapsed),
+      );
+    }
   };
 
   const expandWorkspace = (workspaceId: string) => {
+    if (!collapsedWorkspaces[workspaceId]) {
+      return;
+    }
     setCollapsedWorkspaces((current) => {
-      if (!current[workspaceId]) return current;
-      return { ...current, [workspaceId]: false };
+      const next = { ...current, [workspaceId]: false };
+      saveCollapsedWorkspacesToStorage(next);
+      return next;
     });
+    if (api) {
+      void updateSnapshot(api, setSnapshot, () =>
+        api.setWorkspaceCollapsed(workspaceId, false),
+      );
+    }
   };
 
   const createWorktree = (workspaceId: string, fromSessionWorkspaceId?: string, fromSessionId?: string) => {
@@ -170,7 +231,7 @@ export function useWorkspaceMenu(params: UseWorkspaceMenuParams): WorkspaceMenuS
   };
 
   const removeWorktree = (workspaceId: string, worktree: WorktreeRecord) => {
-    const confirmed = window.confirm(`Remove worktree ${worktree.name}? This removes the git worktree from disk.`);
+    const confirmed = window.confirm(t("sidebar.removeWorktreeConfirmation", { name: worktree.name }));
     setEnvironmentMenuOpen(false);
     if (!confirmed || !api) {
       return;
@@ -203,7 +264,6 @@ export function useWorkspaceMenu(params: UseWorkspaceMenuParams): WorkspaceMenuS
     workspaceRenameId,
     workspaceRenameDraft,
     setWorkspaceRenameDraft,
-    expandedArchivedByWorkspace,
     collapsedWorkspaces,
     environmentMenuOpen,
     setEnvironmentMenuOpen,
@@ -217,7 +277,6 @@ export function useWorkspaceMenu(params: UseWorkspaceMenuParams): WorkspaceMenuS
     submitRename,
     cancelRename,
     removeWorkspace,
-    toggleArchived,
     toggleWorkspaceCollapsed,
     expandWorkspace,
     createWorktree,

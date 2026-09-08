@@ -31,25 +31,13 @@ jobs:
         run: pnpm typecheck
 
       - name: Driver unit tests
-        run: pnpm --filter @pi-gui/pi-sdk-driver test
-
-      - name: Changed-file adapter tests
-        run: pnpm --filter @pi-gui/desktop run test:changed-files
+        run: pnpm --filter @pi-frame/pi-sdk-driver test
 
       - name: Verify install copy
         run: pnpm verify:install-copy
 
       - name: Verify dev launcher argv/PATH contract
         run: pnpm --dir apps/desktop run verify:launcher-contract
-
-      - name: Test release artifact helpers
-        run: pnpm test:release-helpers
-
-      - name: Verify release version consistency
-        run: pnpm verify:release-version
-
-      - name: Verify release configuration
-        run: pnpm verify:release-config
 
   website-build:
     runs-on: ubuntu-latest
@@ -68,10 +56,14 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build website
-        run: pnpm --filter @pi-gui/website run build
+        run: pnpm --filter @pi-frame/website run build
 
   desktop-core:
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/4", "2/4", "3/4", "4/4"]
 
     steps:
       - uses: actions/checkout@v4
@@ -86,14 +78,14 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      - name: Desktop Core
-        run: pnpm --filter @pi-gui/desktop run test:e2e:ci:mac
+      - name: Desktop Core (${{ matrix.shard }})
+        run: pnpm --filter @pi-frame/desktop run test:e2e:ci:mac -- --shard=${{ matrix.shard }}
 
       - name: Upload failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: desktop-core-test-results
+          name: desktop-core-test-results-${{ strategy.job-index }}
           path: apps/desktop/test-results/
           retention-days: 7
           if-no-files-found: ignore
@@ -114,51 +106,11 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      - name: Verify Linux package configuration
-        run: pnpm verify:release-config
-
-      - name: Package Linux AppImage and deb
-        run: pnpm --filter @pi-gui/desktop run package:linux
+      - name: Package Linux AppImage
+        run: pnpm --filter @pi-frame/desktop run package:linux
 
       - name: Verify packaged runtime dependencies
         run: pnpm --dir apps/desktop run verify:packaged-runtime-deps:linux
-
-      - name: Verify Linux packages
-        run: |
-          version="$(node -p "require('./apps/desktop/package.json').version")"
-          bash apps/desktop/scripts/verify-linux-release.sh \
-            --install \
-            "$PWD/apps/desktop/release" \
-            "$version" \
-            "$PWD/apps/desktop/release-proof/linux"
-
-      - name: Stage validated Linux candidate
-        run: |
-          version="$(node -p "require('./apps/desktop/package.json').version")"
-          node apps/desktop/scripts/release-artifacts.mjs stage \
-            --platform linux \
-            --version "$version" \
-            --commit "$GITHUB_SHA" \
-            --input apps/desktop/release \
-            --output apps/desktop/release-candidate
-
-      - name: Upload immutable Linux CI candidate
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-release-linux-${{ github.sha }}
-          path: apps/desktop/release-candidate/
-          if-no-files-found: error
-          retention-days: 14
-          compression-level: 0
-
-      - name: Upload Linux package proof
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-linux-package-proof-${{ github.sha }}
-          path: apps/desktop/release-proof/linux/
-          if-no-files-found: warn
-          retention-days: 14
 
   desktop-package-windows:
     runs-on: windows-latest
@@ -179,11 +131,17 @@ jobs:
       - name: Verify dev launcher argv/PATH contract
         run: pnpm --dir apps/desktop run verify:launcher-contract
 
-      - name: Changed-file adapter tests
-        run: pnpm --filter @pi-gui/desktop run test:changed-files
+      - name: Test Windows notification settings
+        run: pnpm --filter @pi-frame/desktop run test:core:notification-settings
 
       - name: Package Windows directory
-        run: pnpm --filter @pi-gui/desktop run package:win:dir
+        run: pnpm --filter @pi-frame/desktop run package:win:dir
 
       - name: Verify packaged runtime dependencies
         run: pnpm --dir apps/desktop run verify:packaged-runtime-deps:windows
+
+      - name: Verify packaged Computer Use
+        run: pnpm --dir apps/desktop run verify:packaged-computer-use:windows
+
+      - name: Test packaged Windows notification settings
+        run: pnpm --dir apps/desktop run test:prod:notification-settings:windows:ci

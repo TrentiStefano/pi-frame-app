@@ -1,0 +1,42 @@
+extends: ./electron-builder.yml
+
+productName: pi-frame
+copyright: Copyright 2026 pi-frame
+
+extraMetadata:
+  name: pi-frame
+  author: pi-frame
+  description: pi-frame - Desktop workspace for pi
+
+win:
+  executableName: pi-frame
+  signAndEditExecutable: true
+
+# package-windows.mjs supplies a self-contained pnpm deploy directory as appDir.
+# The beforeBuild hook tells electron-builder not to collect or hoist dependencies again.
+beforeBuild: ./scripts/windows-before-build.mjs
+
+nsis:
+  artifactName: ${productName}-${version}-setup-${arch}.${ext}
+  guid: 2cff6e57-c743-5bb1-bebb-ac97efa13881
+  include: installer.nsh
+  shortcutName: pi-frame
+  uninstallDisplayName: ${productName} ${version}
+
+portable:
+  artifactName: ${productName}-${version}-portable-${arch}.${ext}
+
+files:
+  - from: out
+    to: out
+    filter:
+      - "**/*"
+  - from: package.json
+    to: package.json
+  - from: node_modules
+    to: node_modules
+    filter:
+      - "**/*"
+      - "!.pnpm/**/*"
+      - "!.modules.yaml"
+      - "!.pnpm-workspace-state-v1.json"

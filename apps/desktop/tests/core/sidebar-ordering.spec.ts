@@ -98,7 +98,7 @@ test("pinned sidebar threads stay above history, persist across relaunch, and un
 
     const threadARow = window.locator(".session-row", { hasText: "Thread A" });
     await threadARow.hover();
-    await window.getByRole("button", { name: /Pin Thread A/ }).click();
+    await window.getByRole("button", { name: /Pin conversation Thread A/ }).click();
 
     const pinnedSection = window.getByRole("region", { name: "Pinned threads" });
     await expect(pinnedSection).toBeVisible();
@@ -119,7 +119,7 @@ test("pinned sidebar threads stay above history, persist across relaunch, and un
     await expect(reopenedPinnedSection).toBeVisible();
     await expect(reopenedPinnedSection.locator(".session-row__title")).toHaveText(["Thread A"]);
 
-    await reopenedPinnedSection.getByRole("button", { name: /Unpin Thread A/ }).click();
+    await reopenedPinnedSection.getByRole("button", { name: /Unpin conversation Thread A/ }).click();
     await expect(reopenedWindow.getByRole("region", { name: "Pinned threads" })).toHaveCount(0);
 
     await expect.poll(async () => {
@@ -184,12 +184,12 @@ test("pinned sidebar threads can be reordered and repinned threads return to the
     const reopenedPinnedSection = reopenedWindow.getByRole("region", { name: "Pinned threads" });
     await expect(reopenedPinnedSection.locator(".session-row__title")).toHaveText(["Thread A", "Thread B"]);
 
-    await reopenedPinnedSection.getByRole("button", { name: /Unpin Thread A/ }).click();
+    await reopenedPinnedSection.getByRole("button", { name: /Unpin conversation Thread A/ }).click();
     await expect(reopenedPinnedSection.locator(".session-row__title")).toHaveText(["Thread B"]);
 
     const threadAHistoryRow = reopenedWindow.locator(".session-row", { hasText: "Thread A" });
     await threadAHistoryRow.hover();
-    await reopenedWindow.getByRole("button", { name: /Pin Thread A/ }).click();
+    await reopenedWindow.getByRole("button", { name: /Pin conversation Thread A/ }).click();
     await expect(reopenedPinnedSection.locator(".session-row__title")).toHaveText(["Thread A", "Thread B"]);
   } finally {
     await harness.close();
@@ -199,7 +199,7 @@ test("pinned sidebar threads can be reordered and repinned threads return to the
 async function pinThread(window: Page, title: string): Promise<void> {
   const row = window.locator(".session-row", { hasText: title });
   await row.hover();
-  await window.getByRole("button", { name: new RegExp(`Pin ${title}`) }).click();
+  await window.getByRole("button", { name: new RegExp(`Pin conversation ${title}`) }).click();
 }
 
 async function dragPinnedThreadAfter(

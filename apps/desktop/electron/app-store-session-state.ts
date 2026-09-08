@@ -1,8 +1,7 @@
-import { sessionKey } from "@pi-gui/pi-sdk-driver";
-import type { SessionDriverEvent, SessionSnapshot } from "@pi-gui/session-driver";
+import { sessionKey } from "@pi-frame/pi-sdk-driver";
+import type { SessionDriverEvent, SessionRef, SessionSnapshot } from "@pi-frame/session-driver";
 import type { DesktopAppState, SessionRecord, TranscriptMessage } from "../src/desktop-state";
-import { cloneTranscriptMessage, hasUnseenSessionUpdate, previewFromTranscript } from "./app-store-utils";
-import { NEW_THREAD_PLACEHOLDER_TITLE } from "./thread-title-constants";
+import { hasUnseenSessionUpdate, previewFromTranscript } from "./app-store-utils";
 
 export function applySessionEventState(
   state: DesktopAppState,
@@ -10,10 +9,13 @@ export function applySessionEventState(
   transcriptCache: Map<string, TranscriptMessage[]>,
   runningSinceBySession: Map<string, string>,
   lastViewedAtBySession: Map<string, string>,
+  activeAssistantMessageBySession: Map<string, string> = new Map(),
 ): DesktopAppState {
   const key = sessionKey(event.sessionRef);
-  const transcript = (transcriptCache.get(key) ?? []).map(cloneTranscriptMessage);
-  const preview = previewFromTranscript(transcript);
+  const transcript = transcriptCache.get(key) ?? [];
+  const preview = event.type === "assistantDelta"
+    ? previewFromAssistantDelta(transcript)
+    : previewFromTranscript(transcript);
   const lastViewedAt = lastViewedAtBySession.get(key);
 
   return {
@@ -24,14 +26,20 @@ export function applySessionEventState(
             ...workspace,
             sessions: workspace.sessions.map((session) =>
               session.id === event.sessionRef.sessionId
-                ? updateSessionRecord(session, {
-                    snapshot: snapshotForEvent(event),
-                    status: statusForEvent(session.status, event),
-                    transcript,
-                    preview,
-                    runningSince: runningSinceBySession.get(key),
-                    lastViewedAt,
-                  })
+                ? {
+                    ...updateSessionRecord(session, {
+                      snapshot: snapshotForEvent(event),
+                      status: statusForEvent(session.status, event),
+                      transcript,
+                      preview,
+                      runningSince: runningSinceBySession.get(key),
+                      lastViewedAt,
+                    }),
+                    metadataRevision: state.revision + 1,
+                    ...(activeAssistantMessageBySession.has(key)
+                      ? { activeAssistantMessageId: activeAssistantMessageBySession.get(key) }
+                      : { activeAssistantMessageId: undefined }),
+                  }
                 : session,
             ),
           }
@@ -56,15 +64,9 @@ export function updateSessionRecord(
 ): SessionRecord {
   const updatedAt = options.snapshot?.updatedAt ?? session.updatedAt;
   const nextStatus = options.status ?? options.snapshot?.status ?? session.status;
-  const snapshotTitle = options.snapshot?.title;
-  // Queued session events may predate a rename; the placeholder must not replace a resolved title.
-  const title =
-    snapshotTitle === NEW_THREAD_PLACEHOLDER_TITLE && session.title !== NEW_THREAD_PLACEHOLDER_TITLE
-      ? session.title
-      : snapshotTitle ?? session.title;
   return {
     ...session,
-    title,
+    title: options.snapshot?.title ?? session.title,
     updatedAt,
     lastViewedAt: options.lastViewedAt,
     archivedAt: options.snapshot?.archivedAt ?? session.archivedAt,
@@ -74,6 +76,39 @@ export function updateSessionRecord(
     hasUnseenUpdate: hasUnseenSessionUpdate(nextStatus, updatedAt, options.lastViewedAt, options.transcript),
     config: options.snapshot?.config ?? session.config,
   };
+}
+
+export function replaceSessionTitle(
+  state: DesktopAppState,
+  sessionRef: SessionRef,
+  title: string,
+): DesktopAppState {
+  const currentSession = state.workspaces
+    .find((workspace) => workspace.id === sessionRef.workspaceId)
+    ?.sessions.find((session) => session.id === sessionRef.sessionId);
+  if (!currentSession || currentSession.title === title) {
+    return state;
+  }
+  return {
+    ...state,
+    workspaces: state.workspaces.map((workspace) =>
+      workspace.id === sessionRef.workspaceId
+        ? {
+            ...workspace,
+            sessions: workspace.sessions.map((session) =>
+              session.id === sessionRef.sessionId ? { ...session, title } : session,
+            ),
+          }
+        : workspace,
+    ),
+  };
+}
+
+function previewFromAssistantDelta(transcript: readonly TranscriptMessage[]): string | undefined {
+  const last = transcript.at(-1);
+  return last?.kind === "message" && last.role === "assistant"
+    ? last.text
+    : previewFromTranscript(transcript);
 }
 
 function snapshotForEvent(event: SessionDriverEvent) {

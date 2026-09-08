@@ -43,11 +43,13 @@ test("keeps Changes visible when the integrated terminal is open and maximized",
     await waitForWorkspaceByPath(window, workspacePath);
     await createNamedThread(window, "Terminal and Changes layout");
 
-    await window.getByLabel("Toggle changes").click();
+    await window.getByTestId("workspace-tools").click();
+    await window.getByRole("menuitem", { name: "Toggle changes" }).click();
     const diffPanel = window.locator(".diff-panel");
     await expect(diffPanel.locator(".diff-panel__title")).toContainText("Changes");
 
-    await window.getByLabel("Toggle terminal").click();
+    await window.getByTestId("workspace-tools").click();
+    await window.getByRole("menuitem", { name: "Toggle terminal" }).click();
     await expectTerminalAndChangesSplit(window);
 
     const beforeTakeover = await window.getByTestId("integrated-terminal").boundingBox();

@@ -57,7 +57,9 @@ async function renderClip(framesDir: string, outputPath: string): Promise<void> 
     "-y",
     "-framerate", String(frameRate),
     "-i", path.join(framesDir, "frame-%05d.png"),
-    "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
+    // The bundled Windows ffmpeg build omits force_original_aspect_ratio and pad.
+    // Capture at the README target size; Electron frames already use a stable aspect ratio.
+    "-vf", "scale=1920:1080,format=yuv420p",
     "-c:v", "libx264",
     "-crf", "18",
     "-an",

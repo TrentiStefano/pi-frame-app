@@ -1,20 +1,23 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { injectTheme } from "./theme/theme-injector";
+import { resolveThemeById } from "./theme/builtin-themes";
+import type { RuntimeSnapshot } from "@pi-frame/session-driver/runtime-types";
 import {
   getSelectedSession,
   getSelectedWorkspace,
   type AppView,
 } from "./desktop-state";
-import { updateSnapshot, useDesktopAppState } from "./app/desktop-app-state";
+import { applySnapshotIfNewer, updateSnapshot, useDesktopAppState } from "./app/desktop-app-state";
 import { buildFileWorkbenchContexts } from "./app/file-workbench-contexts";
 import { canTogglePrimarySidebar, isEventInsideTerminal } from "./app/app-shell-utils";
 import { useRunningLabel } from "./hooks/use-running-label";
 import { useTimelineScroll, type SidePanelMode } from "./hooks/use-timeline-scroll";
 import { formatRelativeTime } from "./string-utils";
-import { restoreTopmostDialogFocus } from "./dialog-focus";
 import { ComposerPanel } from "./composer-panel";
 import { DiffPanel } from "./diff-panel";
 import type { DiffPanelFileRequest } from "./diff-panel-types";
+import { PlanPanel } from "./plan-panel";
+import { latestPlanFromTranscript, planPreviewKey } from "./plan-preview";
 import { buildModelOptions } from "./composer-commands";
 import {
   desktopCommands,
@@ -25,49 +28,84 @@ import {
 import { deriveModelOnboardingState } from "./model-onboarding";
 import type { SettingsSection } from "./settings-view";
 import { SecondarySurfaces } from "./app/secondary-surfaces";
+import { BrowserPanel, type BrowserLayoutMode } from "./browser-panel";
+import { BrowserPanelResizer } from "./browser-panel-resizer";
+import type { BrowserElementAttachment } from "./browser-types";
 import { NewThreadView } from "./new-thread-view";
 import { buildThreadGroups } from "./thread-groups";
 import { Sidebar } from "./sidebar";
+import { CapabilitiesView } from "./capabilities-view";
+import { SidebarResizer } from "./sidebar-resizer";
+import { SidePanelResizer } from "./side-panel-resizer";
 import { SidebarToggleButton } from "./sidebar-toggle-button";
 import { Topbar } from "./topbar";
+import { WindowsTitlebarMenu } from "./windows-titlebar-menu";
 import { TerminalPanel } from "./terminal-panel";
 import { ConversationTimeline } from "./conversation-timeline";
-import { loadPromptRailVisible, savePromptRailVisible } from "./prompt-rail-store";
+import { APP_DISPLAY_NAME } from "./branding";
 import { useSlashMenu } from "./hooks/use-slash-menu";
 import { useMentionMenu } from "./hooks/use-mention-menu";
 import { useThreadSearch } from "./hooks/use-thread-search";
 import { useWorkspaceMenu } from "./hooks/use-workspace-menu";
 import { useNewThreadController } from "./hooks/use-new-thread-controller";
-import { buildExtensionDockModel, ExtensionDialog, hasExtensionDockContent } from "./extension-session-ui";
+import { ExtensionDialog } from "./extension-session-ui";
 import { TreeModal } from "./tree-modal";
 import { ForkModal } from "./fork-modal";
 import { getEffectiveModelRuntime } from "./model-settings";
-import { applyThemePresetToRoot } from "./theme-presets";
+import { setRendererLanguage } from "./i18n/renderer";
 import { deriveWorkspaceContext } from "./workspace-context";
 import { useTreeForkModals } from "./hooks/use-tree-fork-modals";
 import { useComposerDraftSync } from "./hooks/use-composer-draft-sync";
 import { useSessionComposer } from "./hooks/use-session-composer";
+import { SessionStatsBar } from "./session-stats-bar";
+import { useTranslation } from "react-i18next";
+
+const HIDE_THINKING_STORAGE_KEY = "pi-frame:hide-thinking-blocks";
 
 export default function App() {
+  const { t } = useTranslation();
   const [snapshot, setSnapshot, selectedTranscript] = useDesktopAppState();
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
   const [settingsWorkspaceId, setSettingsWorkspaceId] = useState("");
-  const [skillsWorkspaceId, setSkillsWorkspaceId] = useState("");
   const [extensionsWorkspaceId, setExtensionsWorkspaceId] = useState("");
-  const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">("light");
-  const [dockExpandedBySession, setDockExpandedBySession] = useState<Record<string, boolean>>({});
+  const [hideThinking, setHideThinking] = useState<boolean>(() => {
+    try {
+      return globalThis.localStorage?.getItem(HIDE_THINKING_STORAGE_KEY) === "true";
+    } catch {
+      return false;
+    }
+  });
+
+  const handleToggleHideThinking = useCallback(() => {
+    setHideThinking((current) => {
+      const next = !current;
+      try {
+        globalThis.localStorage?.setItem(HIDE_THINKING_STORAGE_KEY, String(next));
+      } catch {
+        // ignore storage failure
+      }
+      return next;
+    });
+  }, []);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const timelinePaneRef = useRef<HTMLDivElement | null>(null);
   const previousActiveViewRef = useRef<AppView | null>(null);
+  const hasEnteredPrimaryShellRef = useRef(false);
   const [dismissedSchemaSkewSessionKeys, setDismissedSchemaSkewSessionKeys] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
   const [sidePanelMode, setSidePanelMode] = useState<SidePanelMode | null>(null);
+  const seenPlanBySessionRef = useRef(new Map<string, string>());
+  const [browserPanelWidth, setBrowserPanelWidth] = useState(640);
+  const [sidePanelWidth, setSidePanelWidth] = useState(520);
+  const [browserLayoutMode, setBrowserLayoutMode] = useState<BrowserLayoutMode>("split");
+  const browserPreferencesKeyRef = useRef("");
+  const [sidebarWidth, setSidebarWidth] = useState(292);
+  const [isSidebarResizing, setIsSidebarResizing] = useState(false);
   const [openTerminalSessionKey, setOpenTerminalSessionKey] = useState("");
   const [takeoverTerminalSessionKey, setTakeoverTerminalSessionKey] = useState("");
   const [terminalHeight, setTerminalHeight] = useState(340);
   const [diffFileRequest, setDiffFileRequest] = useState<DiffPanelFileRequest | null>(null);
-  const [promptRailVisible, setPromptRailVisible] = useState(loadPromptRailVisible);
   const threadSearch = useThreadSearch(timelinePaneRef);
   const api = window.piApp;
   const sidebarToggleStateRef = useRef<{
@@ -90,27 +128,28 @@ export default function App() {
     if (!piApi) return;
 
     void piApi.getResolvedTheme().then((theme) => {
-      setResolvedTheme(theme);
       document.documentElement.classList.toggle("dark", theme === "dark");
     });
 
     const unsub = piApi.onThemeChanged((theme) => {
-      setResolvedTheme(theme);
       document.documentElement.classList.toggle("dark", theme === "dark");
     });
 
     return unsub;
   }, []);
 
+  // Apply custom theme CSS variables whenever the themeId or custom theme list changes
   useEffect(() => {
-    applyThemePresetToRoot(document.documentElement, snapshot?.themePresetId ?? "default", resolvedTheme);
-  }, [resolvedTheme, snapshot?.themePresetId]);
+    if (!snapshot) return;
+    const theme = resolveThemeById(snapshot.themeId, snapshot.customThemes);
+    injectTheme(theme);
+  }, [snapshot?.themeId, snapshot?.customThemes]);
 
   useEffect(() => {
     if (snapshot) {
-      document.documentElement.classList.toggle("enable-transparency", snapshot.enableTransparency);
+      setRendererLanguage(snapshot.appLanguage);
     }
-  }, [snapshot?.enableTransparency]);
+  }, [snapshot?.appLanguage]);
 
   const {
     activeWorktrees,
@@ -143,6 +182,7 @@ export default function App() {
   const editingQueuedMessageId = snapshot?.editingQueuedMessageId;
   const runningLabel = useRunningLabel(selectedSession?.status === "running" ? selectedSession.runningSince : undefined);
   const selectedSessionKey = selectedWorkspace && selectedSession ? `${selectedWorkspace.id}:${selectedSession.id}` : "";
+  const selectedCollaborationMode = snapshot?.collaborationModeBySession[selectedSessionKey] ?? "default";
   const { composerDraft, setComposerDraft, composerDraftRef, flushComposerDraft } = useComposerDraftSync({
     api,
     snapshot,
@@ -159,7 +199,15 @@ export default function App() {
       ? selectedTranscript
       : null;
   const activeTranscript = selectedTranscriptForSession?.transcript ?? [];
+  const latestPlan = useMemo(() => latestPlanFromTranscript(activeTranscript), [activeTranscript]);
   const isTranscriptLoading = Boolean(selectedSession) && !selectedTranscriptForSession;
+  useEffect(() => {
+    if (!selectedSessionKey || !latestPlan) return;
+    const key = planPreviewKey(latestPlan);
+    if (seenPlanBySessionRef.current.get(selectedSessionKey) === key) return;
+    seenPlanBySessionRef.current.set(selectedSessionKey, key);
+    setSidePanelMode((current) => current ?? "plan");
+  }, [latestPlan, selectedSessionKey]);
   const {
     setTimelinePaneElement,
     disableTimelineVirtualization,
@@ -167,6 +215,7 @@ export default function App() {
     handleTimelineScroll,
     handleTimelineScrollIntent,
     handleTimelineContentHeightChange,
+    handleComposerHeightChange,
     showJumpToLatest,
     jumpToLatest,
     saveCurrentTimelineScrollState,
@@ -179,8 +228,6 @@ export default function App() {
     selectedTranscriptForSession,
     activeView: snapshot?.activeView,
     sidePanelMode,
-    composerRef,
-    composerDraft,
     timelinePaneRef,
   });
   const showSchemaSkewNotice =
@@ -220,22 +267,17 @@ export default function App() {
     setOpenTerminalSessionKey("");
     setTakeoverTerminalSessionKey("");
   }, [selectedSessionKey]);
-  const selectedExtensionDock = useMemo(() => buildExtensionDockModel(selectedExtensionUi), [selectedExtensionUi]);
   const displayedSessionTitle = selectedExtensionUi?.title ?? selectedSession?.title ?? "";
   const activeExtensionDialog = selectedExtensionUi?.pendingDialogs[0];
-  const isSelectedExtensionDockExpanded = dockExpandedBySession[selectedSessionKey] ?? false;
   const threadGroups = useMemo(
     () => (snapshot ? buildThreadGroups(snapshot) : []),
     [snapshot?.workspaces, snapshot?.worktreesByWorkspace, snapshot?.workspaceOrder],
   );
-  const focusComposer = () => {
+  const focusComposer = useCallback(() => {
     window.requestAnimationFrame(() => {
-      if (restoreTopmostDialogFocus()) {
-        return;
-      }
       composerRef.current?.focus();
     });
-  };
+  }, []);
   const toggleTerminal = useCallback(() => {
     if (!selectedSessionKey) {
       return;
@@ -283,13 +325,31 @@ export default function App() {
     toggleSidePanelMode("files");
   }, [toggleSidePanelMode]);
 
-  const togglePromptRail = useCallback(() => {
-    setPromptRailVisible((current) => {
-      const next = !current;
-      savePromptRailVisible(next);
-      return next;
-    });
-  }, []);
+  const togglePlanPanel = useCallback(() => {
+    toggleSidePanelMode("plan");
+  }, [toggleSidePanelMode]);
+
+  const togglePlanMode = useCallback(async () => {
+    if (!api || !selectedWorkspace || !selectedSession || selectedSession.status === "running") return;
+    await updateSnapshot(api, setSnapshot, () => api.updateComposerDraft(composerDraftRef.current));
+    await updateSnapshot(api, setSnapshot, () => api.submitComposer("/plan", { preserveComposer: true }));
+    focusComposer();
+  }, [api, focusComposer, selectedSession, selectedWorkspace]);
+
+  const toggleBrowserPanel = useCallback(() => {
+    toggleSidePanelMode("browser");
+  }, [toggleSidePanelMode]);
+
+  const openBrowserAttachment = useCallback(async (attachment: BrowserElementAttachment) => {
+    if (!api || !selectedWorkspace || !selectedSession) return;
+    const target = { workspaceId: selectedWorkspace.id, sessionId: selectedSession.id };
+    setSidePanelMode("browser");
+    try {
+      await api.sendBrowserCommand(target, { kind: "activate-tab", tabId: attachment.tabId });
+    } catch {
+      await api.sendBrowserCommand(target, { kind: "open-tab", url: attachment.page.url });
+    }
+  }, [api, selectedSession, selectedWorkspace]);
 
   const openSettings = (workspaceId?: string, section?: SettingsSection) => {
     if (!api) {
@@ -375,6 +435,7 @@ export default function App() {
 
   const wsMenu = useWorkspaceMenu({
     api,
+    snapshot,
     setSnapshot,
     updateSnapshot,
   });
@@ -389,6 +450,7 @@ export default function App() {
     selectedWorkspace,
     expandWorkspace: wsMenu.expandWorkspace,
     openSettings,
+    shortcutBindings: snapshot?.shortcutBindings,
   });
 
   const {
@@ -419,44 +481,18 @@ export default function App() {
     handleSlashKeyDown: slashMenu.handleSlashKeyDown,
     newThreadComposerRef: newThread.composerRef,
     appendNewThreadAttachment: newThread.appendAttachment,
+    shortcutBindings: snapshot?.shortcutBindings,
   });
 
-  useEffect(() => {
-    const sessionExtensionUiBySession = snapshot?.sessionExtensionUiBySession;
-    if (!sessionExtensionUiBySession) {
-      setDockExpandedBySession((current) => (Object.keys(current).length > 0 ? {} : current));
-      return;
-    }
 
-    setDockExpandedBySession((current) => {
-      let next: Record<string, boolean> | undefined;
-      for (const [sessionKey, expanded] of Object.entries(current)) {
-        if (!expanded && sessionExtensionUiBySession[sessionKey]) {
-          continue;
-        }
-        if (hasExtensionDockContent(sessionExtensionUiBySession[sessionKey])) {
-          continue;
-        }
-        if (!next) {
-          next = { ...current };
-        }
-        delete next[sessionKey];
-      }
-      return next ?? current;
-    });
-  }, [snapshot?.sessionExtensionUiBySession]);
 
   useEffect(() => {
     if (rootWorkspaceOptions.length === 0) {
       setSettingsWorkspaceId("");
-      setSkillsWorkspaceId("");
       setExtensionsWorkspaceId("");
       return;
     }
     setSettingsWorkspaceId((current) =>
-      rootWorkspaceOptions.some((workspace) => workspace.id === current) ? current : (current || rootWorkspaceOptions[0]?.id || ""),
-    );
-    setSkillsWorkspaceId((current) =>
       rootWorkspaceOptions.some((workspace) => workspace.id === current) ? current : (current || rootWorkspaceOptions[0]?.id || ""),
     );
     setExtensionsWorkspaceId((current) =>
@@ -487,6 +523,9 @@ export default function App() {
       } else if (command === desktopCommands.toggleTerminal) {
         toggleTerminal();
         return true;
+      } else if (command === desktopCommands.toggleBrowser) {
+        toggleBrowserPanel();
+        return true;
       } else if (command === desktopCommands.toggleSidebar) {
         return handleTogglePrimarySidebar();
       }
@@ -506,6 +545,11 @@ export default function App() {
           shift: event.shiftKey,
           key: event.key,
           code: event.code,
+          ctrl: event.ctrlKey,
+          meta: event.metaKey,
+          alt: event.altKey,
+          platform: api?.platform,
+          bindings: snapshot?.shortcutBindings,
         });
         if (command === desktopCommands.toggleTerminal) {
           event.preventDefault();
@@ -534,6 +578,11 @@ export default function App() {
         shift: event.shiftKey,
         key: event.key,
         code: event.code,
+        ctrl: event.ctrlKey,
+        meta: event.metaKey,
+        alt: event.altKey,
+        platform: api?.platform,
+        bindings: snapshot?.shortcutBindings,
       });
       if (command && handleCommand(command)) {
         event.preventDefault();
@@ -553,8 +602,10 @@ export default function App() {
     api,
     toggleChangesPanel,
     toggleTerminal,
+    toggleBrowserPanel,
     handleTogglePrimarySidebar,
     newThread,
+    snapshot?.shortcutBindings,
   ]);
 
   useEffect(() => {
@@ -574,6 +625,23 @@ export default function App() {
   }, [selectedSession, selectedWorkspace?.id, snapshot]);
 
   const sidePanelAvailable = snapshot?.activeView === "threads" && Boolean(selectedWorkspace && selectedSession);
+  const browserPreferencesKey = selectedWorkspace ? `pi-browser-layout:${selectedWorkspace.id}` : "";
+  useEffect(() => {
+    browserPreferencesKeyRef.current = browserPreferencesKey;
+    if (!browserPreferencesKey) return;
+    try {
+      const stored = JSON.parse(localStorage.getItem(browserPreferencesKey) ?? "null") as { width?: unknown; mode?: unknown } | null;
+      if (typeof stored?.width === "number" && Number.isFinite(stored.width)) setBrowserPanelWidth(Math.min(900, Math.max(420, stored.width)));
+      if (stored?.mode === "conversation" || stored?.mode === "split" || stored?.mode === "browser") setBrowserLayoutMode(stored.mode);
+    } catch {
+      setBrowserPanelWidth(640);
+      setBrowserLayoutMode("split");
+    }
+  }, [browserPreferencesKey]);
+  useEffect(() => {
+    if (!browserPreferencesKey || browserPreferencesKeyRef.current !== browserPreferencesKey) return;
+    localStorage.setItem(browserPreferencesKey, JSON.stringify({ width: browserPanelWidth, mode: browserLayoutMode }));
+  }, [browserLayoutMode, browserPanelWidth, browserPreferencesKey]);
   useEffect(() => {
     if (!sidePanelAvailable) {
       setSidePanelMode(null);
@@ -583,10 +651,12 @@ export default function App() {
   if (!api || !snapshot) {
     return (
       <div className="shell shell--loading">
-        <main className="loading-card">
-          <div className="loading-card__eyebrow">pi-gui</div>
-          <h1>Loading sessions</h1>
-          <p>The desktop shell is restoring folder and thread state from the main process.</p>
+        <main className="loading-screen" role="status" aria-live="polite">
+          <div className="loading-screen__spinner" aria-hidden="true" />
+          <div className="loading-screen__copy">
+            <h1>{APP_DISPLAY_NAME}</h1>
+            <p>{t("shell.loadingTitle")}</p>
+          </div>
         </main>
       </div>
     );
@@ -594,23 +664,52 @@ export default function App() {
 
   const showTerminalTakeover = isTerminalVisibleForSelectedThread && isTerminalTakeoverForSelectedThread && Boolean(selectedWorkspace);
   const secondarySurfaceView =
-    snapshot.activeView === "settings" || snapshot.activeView === "skills" || snapshot.activeView === "extensions"
+    snapshot.activeView === "settings" || snapshot.activeView === "extensions"
       ? snapshot.activeView
       : null;
+  const shouldAnimateShellEntrance = !hasEnteredPrimaryShellRef.current;
+  hasEnteredPrimaryShellRef.current = true;
+  const shellClassName = `shell${shouldAnimateShellEntrance ? " shell--enter" : ""}${
+    snapshot.sidebarCollapsed ? " shell--sidebar-collapsed" : ""
+  }${isSidebarResizing ? " shell--sidebar-resizing" : ""}`;
   const mainClassName = [
     "main",
     sidePanelMode ? "main--with-side-panel" : "",
     sidePanelMode ? "main--with-diff" : "",
+    sidePanelMode === "browser" ? "main--with-browser" : "",
+    sidePanelMode === "browser" ? `main--browser-${browserLayoutMode}` : "",
     isTerminalVisibleForSelectedThread ? "main--with-terminal" : "",
     showTerminalTakeover ? "main--terminal-takeover" : "",
-    snapshot.startupDiagnostics.length > 0 ? "main--with-startup-diagnostics" : "",
   ].filter(Boolean).join(" ");
+  const mainStyle = sidePanelMode === "browser"
+    ? ({ "--browser-panel-width": `${browserPanelWidth}px` } as CSSProperties)
+    : sidePanelMode && sidePanelMode !== "plan"
+      ? ({ "--side-panel-width": `${sidePanelWidth}px` } as CSSProperties)
+      : undefined;
+  const sidebarToggle = primarySidebarToggleVisible ? (
+    <SidebarToggleButton
+      collapsed={snapshot.sidebarCollapsed}
+      shortcutLabel={sidebarToggleShortcutLabel}
+      onToggle={handleTogglePrimarySidebar}
+    />
+  ) : null;
+  const sidebarResizer = !snapshot.sidebarCollapsed ? (
+    <SidebarResizer
+      value={sidebarWidth}
+      min={240}
+      max={480}
+      onChange={setSidebarWidth}
+      onResizeStart={() => setIsSidebarResizing(true)}
+      onResizeEnd={() => setIsSidebarResizing(false)}
+    />
+  ) : null;
   const terminalPanel = isTerminalVisibleForSelectedThread && selectedWorkspace ? (
     <TerminalPanel
       workspace={selectedWorkspace}
       sessionId={selectedSession?.id ?? ""}
       height={terminalHeight}
       isTakeover={isTerminalTakeoverForSelectedThread}
+      shortcutBindings={snapshot.shortcutBindings}
       onHeightChange={(nextHeight) => {
         setTerminalHeight(nextHeight);
         setTakeoverTerminalSessionKey((current) => (current === selectedSessionKey ? "" : current));
@@ -628,28 +727,6 @@ export default function App() {
 
   const setActiveView = (view: AppView) => {
     void updateSnapshot(api, setSnapshot, () => api.setActiveView(view));
-  };
-
-  const openSkills = (workspaceId?: string) => {
-    const nextWorkspaceId =
-      workspaceId && rootWorkspaceOptions.some((workspace) => workspace.id === workspaceId)
-        ? workspaceId
-        : skillsWorkspaceId || rootWorkspaceOptions[0]?.id || "";
-    if (nextWorkspaceId) {
-      setSkillsWorkspaceId(nextWorkspaceId);
-    }
-    setActiveView("skills");
-  };
-
-  const openExtensions = (workspaceId?: string) => {
-    const nextWorkspaceId =
-      workspaceId && rootWorkspaceOptions.some((workspace) => workspace.id === workspaceId)
-        ? workspaceId
-        : extensionsWorkspaceId || rootWorkspaceOptions[0]?.id || "";
-    if (nextWorkspaceId) {
-      setExtensionsWorkspaceId(nextWorkspaceId);
-    }
-    setActiveView("extensions");
   };
 
   const handleSetSessionModel = (provider: string, modelId: string) => {
@@ -672,15 +749,6 @@ export default function App() {
         level as NonNullable<RuntimeSnapshot["settings"]["defaultThinkingLevel"]>,
       ),
     );
-  };
-
-  const handleTrySkill = (command: string) => {
-    void updateSnapshot(api, setSnapshot, () => api.setActiveView("threads"));
-    slashMenu.fillComposerFromSlash(command);
-  };
-
-  const handleArchiveSession = (target: { workspaceId: string; sessionId: string }) => {
-    void updateSnapshot(api, setSnapshot, () => api.archiveSession(target));
   };
 
   const handleSelectSession = (target: { workspaceId: string; sessionId: string }) => {
@@ -712,23 +780,16 @@ export default function App() {
     });
   };
 
-  const handleToggleExtensionDock = () => {
-    if (!selectedExtensionDock) {
-      return;
-    }
-
-    setDockExpandedBySession((current) => ({
-      ...current,
-      [selectedSessionKey]: !(current[selectedSessionKey] ?? false),
-    }));
-  };
-
-  const handleUnarchiveSession = (target: { workspaceId: string; sessionId: string }) => {
-    void updateSnapshot(api, setSnapshot, () => api.unarchiveSession(target));
-  };
-
   const handleSetSessionPinned = (target: { workspaceId: string; sessionId: string }, pinned: boolean) => {
-    void updateSnapshot(api, setSnapshot, () => api.setSessionPinned(target, pinned));
+    const session = snapshot.workspaces
+      .find((workspace) => workspace.id === target.workspaceId)
+      ?.sessions.find((entry) => entry.id === target.sessionId);
+    void updateSnapshot(api, setSnapshot, async () => {
+      if (pinned && session?.archivedAt) {
+        await api.unarchiveSession(target);
+      }
+      return api.setSessionPinned(target, pinned);
+    });
   };
 
   if (secondarySurfaceView) {
@@ -742,55 +803,40 @@ export default function App() {
         settingsSection={settingsSection}
         onSelectSettingsSection={setSettingsSection}
         settingsWorkspaceId={settingsWorkspaceId}
-        onSelectSettingsWorkspace={setSettingsWorkspaceId}
-        skillsWorkspaceId={skillsWorkspaceId}
-        onSelectSkillsWorkspace={setSkillsWorkspaceId}
         extensionsWorkspaceId={extensionsWorkspaceId}
         onSelectExtensionsWorkspace={setExtensionsWorkspaceId}
         onBack={() => setActiveView("threads")}
-        onTrySkill={handleTrySkill}
       />
     );
   }
 
-  const shellClassName = `shell${snapshot.sidebarCollapsed ? " shell--sidebar-collapsed" : ""}`;
-
   return (
-    <div className={shellClassName}>
-      {primarySidebarToggleVisible ? (
-        <SidebarToggleButton
-          collapsed={snapshot.sidebarCollapsed}
-          shortcutLabel={sidebarToggleShortcutLabel}
-          onToggle={handleTogglePrimarySidebar}
-        />
-      ) : null}
-      {!snapshot.sidebarCollapsed ? (
-        <Sidebar
-          activeView={snapshot.activeView}
-          selectedWorkspace={selectedWorkspace}
-          selectedSession={selectedSession}
-          visibleWorkspaces={visibleWorkspaces}
-          threadGroups={threadGroups}
-          pinnedSessionOrder={snapshot.pinnedSessionOrder}
-          linkedWorktreeByWorkspaceId={linkedWorktreeByWorkspaceId}
-          wsMenu={wsMenu}
-          api={api}
-          setSnapshot={setSnapshot}
-          updateSnapshot={updateSnapshot}
-          onNewThread={() => newThread.openSurface(selectedWorkspace?.rootWorkspaceId ?? selectedWorkspace?.id)}
-          onSetActiveView={setActiveView}
-          onOpenSkills={openSkills}
-          onOpenExtensions={openExtensions}
-          onOpenSettings={openSettings}
-          onArchiveSession={handleArchiveSession}
-          onSelectSession={handleSelectSession}
-          onSetSessionPinned={handleSetSessionPinned}
-          onUnarchiveSession={handleUnarchiveSession}
-        />
-      ) : null}
+    <div className={shellClassName} style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}>
+      <WindowsTitlebarMenu api={api} sidebarToggle={sidebarToggle} />
+      <Sidebar
+        collapsed={snapshot.sidebarCollapsed}
+        activeView={snapshot.activeView}
+        selectedWorkspace={selectedWorkspace}
+        selectedSession={selectedSession}
+        visibleWorkspaces={visibleWorkspaces}
+        threadGroups={threadGroups}
+        pinnedSessionOrder={snapshot.pinnedSessionOrder}
+        linkedWorktreeByWorkspaceId={linkedWorktreeByWorkspaceId}
+        wsMenu={wsMenu}
+        api={api}
+        setSnapshot={setSnapshot}
+        updateSnapshot={updateSnapshot}
+        onNewThread={() => newThread.openSurface(selectedWorkspace?.rootWorkspaceId ?? selectedWorkspace?.id)}
+        onSetActiveView={setActiveView}
+        onOpenSettings={openSettings}
+        onSelectSession={handleSelectSession}
+        onSetSessionPinned={handleSetSessionPinned}
+      />
+      {sidebarResizer}
 
-      <main className={mainClassName}>
+      <main className={mainClassName} style={mainStyle}>
         <Topbar
+          sidebarToggle={api.platform === "win32" ? null : sidebarToggle}
           activeView={snapshot.activeView}
           rootWorkspace={rootWorkspace}
           selectedWorkspace={selectedWorkspace}
@@ -801,6 +847,7 @@ export default function App() {
           workspaces={snapshot.workspaces}
           wsMenu={wsMenu}
           api={api}
+          shortcutBindings={snapshot.shortcutBindings}
           terminalAvailable={Boolean(selectedSessionKey)}
           terminalVisible={isTerminalVisibleForSelectedThread}
           onToggleTerminal={toggleTerminal}
@@ -809,37 +856,36 @@ export default function App() {
           onToggleChanges={toggleChangesPanel}
           filesVisible={sidePanelMode === "files"}
           onToggleFiles={toggleFilesPanel}
-          promptRailVisible={promptRailVisible}
-          onTogglePromptRail={togglePromptRail}
+          planAvailable={sidePanelAvailable}
+          planVisible={sidePanelMode === "plan"}
+          onTogglePlan={togglePlanPanel}
+          browserVisible={sidePanelMode === "browser"}
+          onToggleBrowser={toggleBrowserPanel}
         />
-
-        {snapshot.startupDiagnostics.length > 0 ? (
-          <div className="startup-diagnostics" role="status" data-testid="startup-diagnostics">
-            <strong>Some saved workspaces could not be refreshed.</strong>
-            <span>
-              {snapshot.startupDiagnostics
-                .map((diagnostic) => {
-                  const workspaceName = diagnostic.workspacePath?.split(/[\\/]/).filter(Boolean).at(-1);
-                  return workspaceName ? `${workspaceName} is unavailable.` : diagnostic.message;
-                })
-                .join(" ")}
-            </span>
-          </div>
-        ) : null}
 
         {showTerminalTakeover ? (
           terminalPanel
         ) : (
           <>
-        {snapshot.activeView === "new-thread" ? (
+        {snapshot.activeView === "skills" ? (
+          <CapabilitiesView
+            api={api}
+            snapshot={snapshot}
+            workspaces={rootWorkspaceOptions}
+            initialWorkspaceId={selectedWorkspace?.rootWorkspaceId ?? selectedWorkspace?.id ?? rootWorkspaceOptions[0]?.id ?? ""}
+            setSnapshot={setSnapshot}
+          />
+        ) : snapshot.activeView === "new-thread" ? (
           rootWorkspaceOptions.length > 0 ? (
             <NewThreadView
               workspaces={rootWorkspaceOptions}
               selectedWorkspaceId={newThread.rootWorkspaceId || rootWorkspaceOptions[0]?.id || ""}
               runtime={newThread.runtime}
               environment={newThread.environment}
+              collaborationMode={newThread.collaborationMode}
               prompt={newThread.prompt}
               attachments={newThread.attachments}
+              isSubmitting={newThread.isStarting}
               lastError={newThread.composerError}
               provider={newThread.resolvedProvider}
               modelId={newThread.resolvedModelId}
@@ -883,9 +929,9 @@ export default function App() {
           ) : (
             <section className="canvas canvas--empty">
               <div className="empty-panel">
-                <div className="session-header__eyebrow">Workspace</div>
-                <h1>Open a folder to start</h1>
-                <p>Add a project folder before creating a new thread.</p>
+                <div className="session-header__eyebrow">{t("common.workspace")}</div>
+                <h1>{t("shell.openFolderTitle")}</h1>
+                <p>{t("shell.addFolderBeforeThread")}</p>
               </div>
             </section>
           )
@@ -896,8 +942,8 @@ export default function App() {
                 <div className="chat-header">
                   <div className="chat-header__eyebrow">
                     {selectedWorkspace.kind === "worktree"
-                      ? `${rootWorkspace?.name ?? selectedWorkspace.name} · ${selectedWorktree?.name ?? selectedWorkspace.branchName ?? "Worktree"}`
-                      : `${selectedWorkspace.name} · Local`}
+                      ? `${rootWorkspace?.name ?? selectedWorkspace.name} · ${selectedWorktree?.name ?? selectedWorkspace.branchName ?? t("common.worktree")}`
+                      : `${selectedWorkspace.name} · ${t("common.local")}`}
                   </div>
                   <div className="chat-header__row">
                     <h1 className="chat-header__title">{displayedSessionTitle}</h1>
@@ -905,28 +951,39 @@ export default function App() {
                       {selectedSession.status === "running" ? runningLabel : formatRelativeTime(selectedSession.updatedAt)}
                     </div>
                   </div>
+                  <SessionStatsBar
+                    transcript={activeTranscript}
+                    selectedModelRuntime={selectedModelRuntime}
+                    resolvedProvider={resolvedSessionProvider}
+                    resolvedModelId={resolvedSessionModelId}
+                    hideThinking={hideThinking}
+                    onToggleHideThinking={handleToggleHideThinking}
+                  />
                 </div>
 
                 {showSchemaSkewNotice ? (
                   <div className="schema-skew-notice" role="status" data-testid="schema-skew-notice">
                     <span className="schema-skew-notice__text">
-                      This session was written by a newer version of pi — some content may not display. Update pi-gui
-                      (or open it with the pi CLI) to see everything.
+                      {t("shell.schemaSkewNotice", { appName: APP_DISPLAY_NAME })}
                     </span>
                     <button
                       type="button"
                       className="schema-skew-notice__dismiss"
-                      aria-label="Dismiss notice"
+                      aria-label={t("shell.dismissNotice")}
                       onClick={() => dismissSchemaSkewNotice(selectedSessionKey)}
                     >
-                      Dismiss
+                      {t("common.dismiss")}
                     </button>
                   </div>
                 ) : null}
 
                 <ConversationTimeline
                   transcript={activeTranscript}
+                  sessionKey={selectedSessionKey}
                   isTranscriptLoading={isTranscriptLoading}
+                  streamingAssistantMessageId={
+                    selectedSession.status === "running" ? selectedSession.activeAssistantMessageId : undefined
+                  }
                   timelinePaneRef={timelinePaneRef}
                   timelinePaneElementRef={setTimelinePaneElement}
                   disableVirtualization={disableTimelineVirtualization}
@@ -938,13 +995,16 @@ export default function App() {
                   onJumpToLatest={jumpToLatest}
                   onContentHeightChange={handleTimelineContentHeightChange}
                   onViewFileInDiff={handleViewFileInDiff}
+                  onViewPlan={latestPlan ? () => setSidePanelMode("plan") : undefined}
                   onForkFromMessage={selectedSession.status === "running" ? undefined : openForkModal}
-                  promptRailVisible={promptRailVisible}
+                  onOpenBrowserAttachment={openBrowserAttachment}
+                  hideThinking={hideThinking}
                 />
               </div>
             </section>
             <ComposerPanel
               key={selectedSessionKey}
+              collaborationMode={selectedCollaborationMode}
               activeSlashCommand={slashMenu.activeSlashFlow?.command}
               activeSlashCommandMeta={slashMenu.activeSlashFlow?.command?.description}
               attachments={composerAttachments}
@@ -995,9 +1055,7 @@ export default function App() {
               selectedMentionIndex={mentionMenu.selectedIndex}
               onSelectMention={mentionMenu.insertMention}
               onEnableMentionExtension={mentionMenu.enableMentionExtension}
-              extensionDock={selectedExtensionDock}
-              extensionDockExpanded={isSelectedExtensionDockExpanded}
-              onToggleExtensionDock={handleToggleExtensionDock}
+              onTextareaHeightChange={handleComposerHeightChange}
             />
             {activeExtensionDialog ? (
               <ExtensionDialog dialog={activeExtensionDialog} onRespond={handleRespondToExtensionDialog} />
@@ -1026,16 +1084,16 @@ export default function App() {
         ) : selectedWorkspace ? (
           <section className="canvas canvas--empty">
             <div className="empty-panel">
-              <div className="session-header__eyebrow">Workspace</div>
+              <div className="session-header__eyebrow">{t("common.workspace")}</div>
               <h1>{selectedWorkspace.name}</h1>
-              <p>Create a thread for this folder, then jump between sessions from the sidebar.</p>
+              <p>{t("shell.createThreadForWorkspace")}</p>
               <div className="empty-panel__actions">
                 <button
                   className="button button--primary"
                   type="button"
                   onClick={() => newThread.openSurface(selectedWorkspace?.rootWorkspaceId ?? selectedWorkspace?.id)}
                 >
-                  New thread
+                  {t("common.newThread")}
                 </button>
               </div>
             </div>
@@ -1043,9 +1101,9 @@ export default function App() {
         ) : (
           <section className="canvas canvas--empty">
             <div className="empty-panel">
-              <div className="session-header__eyebrow">Workspace</div>
-              <h1>Open a folder to start</h1>
-              <p>Add project folders, group sessions under them, and jump between threads from the sidebar.</p>
+              <div className="session-header__eyebrow">{t("common.workspace")}</div>
+              <h1>{t("shell.openFolderTitle")}</h1>
+              <p>{t("shell.organizeFolders")}</p>
             </div>
           </section>
         )}
@@ -1053,7 +1111,37 @@ export default function App() {
         {terminalPanel}
           </>
         )}
-        {sidePanelMode && selectedWorkspace && selectedSession ? (
+        {sidePanelMode === "browser" && browserLayoutMode === "split" ? (
+          <BrowserPanelResizer
+            value={browserPanelWidth}
+            min={420}
+            max={Math.max(420, Math.min(900, window.innerWidth - 420))}
+            onChange={setBrowserPanelWidth}
+          />
+        ) : sidePanelMode && sidePanelMode !== "browser" && sidePanelMode !== "plan" ? (
+          <SidePanelResizer
+            value={sidePanelWidth}
+            min={340}
+            max={Math.max(340, window.innerWidth - 360)}
+            onChange={setSidePanelWidth}
+          />
+        ) : null}
+        {sidePanelMode === "browser" && selectedWorkspace && selectedSession ? (
+          <BrowserPanel
+            key={`${selectedWorkspace.id}:${selectedSession.id}`}
+            api={api}
+            target={{ workspaceId: selectedWorkspace.id, sessionId: selectedSession.id }}
+            layoutMode={browserLayoutMode}
+            onLayoutModeChange={setBrowserLayoutMode}
+          />
+        ) : sidePanelMode === "plan" && selectedWorkspace && selectedSession ? (
+          <PlanPanel
+            plan={latestPlan}
+            planModeDisabled={selectedSession.status === "running"}
+            planModeEnabled={selectedCollaborationMode === "plan"}
+            onTogglePlanMode={togglePlanMode}
+          />
+        ) : sidePanelMode && sidePanelMode !== "browser" && sidePanelMode !== "plan" && selectedWorkspace && selectedSession ? (
           <DiffPanel
             key={sidePanelMode}
             panelMode={sidePanelMode}
@@ -1063,6 +1151,11 @@ export default function App() {
             sessionStatus={selectedSession.status}
             fileRequest={diffFileRequest}
             contexts={fileWorkbenchContexts}
+            onEnsureExpanded={() => {
+              if (sidePanelWidth < 740) {
+                setSidePanelWidth(760);
+              }
+            }}
           />
         ) : null}
       </main>

@@ -1,5 +1,6 @@
 import type { ComposerAttachment, QueuedComposerMessage } from "./desktop-state";
-import { FileIcon } from "./icons";
+import { BrowserPreviewIcon, FileIcon } from "./icons";
+import { useTranslation } from "react-i18next";
 
 interface QueuedComposerMessagesProps {
   readonly messages: readonly QueuedComposerMessage[];
@@ -18,6 +19,7 @@ export function QueuedComposerMessages({
   onSteerMessage,
   onCancelEdit,
 }: QueuedComposerMessagesProps) {
+  const { t } = useTranslation();
   if (messages.length === 0 && !editingQueuedMessageId) {
     return null;
   }
@@ -26,9 +28,9 @@ export function QueuedComposerMessages({
     <div className="queued-composer-messages" data-testid="queued-composer-messages">
       {editingQueuedMessageId ? (
         <div className="queued-composer-messages__editing" data-testid="queued-composer-editing">
-          <span>Editing queued message</span>
+          <span>{t("queue.editing")}</span>
           <button type="button" onClick={onCancelEdit}>
-            Cancel
+            {t("common.cancel")}
           </button>
         </div>
       ) : null}
@@ -43,14 +45,14 @@ export function QueuedComposerMessages({
             <div className="queued-composer-message__actions">
               {message.mode !== "steer" ? (
                 <button type="button" onClick={() => onSteerMessage(message.id)}>
-                  Steer
+                  {t("composer.steer")}
                 </button>
               ) : null}
               <button type="button" onClick={() => onEditMessage(message.id)}>
-                Edit
+                {t("common.edit")}
               </button>
-              <button aria-label={`Delete queued message ${message.text || message.id}`} type="button" onClick={() => onRemoveMessage(message.id)}>
-                Delete
+              <button aria-label={t("queue.deleteMessage", { name: message.text || message.id })} type="button" onClick={() => onRemoveMessage(message.id)}>
+                {t("common.delete")}
               </button>
             </div>
           </div>
@@ -76,6 +78,10 @@ function QueuedAttachmentPreview({ attachment }: { readonly attachment: Composer
           className="queued-composer-attachment__preview"
           src={`data:${attachment.mimeType};base64,${attachment.data}`}
         />
+      ) : attachment.kind === "browser-element" ? (
+        <span className="queued-composer-attachment__icon" aria-hidden="true">
+          <BrowserPreviewIcon />
+        </span>
       ) : (
         <span className="queued-composer-attachment__icon" aria-hidden="true">
           <FileIcon />

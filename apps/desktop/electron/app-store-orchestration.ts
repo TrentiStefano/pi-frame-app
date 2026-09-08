@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
-import { sessionKey } from "@pi-gui/pi-sdk-driver";
-import type { SessionDriverEvent, SessionRef } from "@pi-gui/session-driver";
+import { sessionKey } from "@pi-frame/pi-sdk-driver";
+import type { SessionDriverEvent, SessionRef } from "@pi-frame/session-driver";
 import type {
   DesktopAppState,
   OrchestrationEvidenceRecord,

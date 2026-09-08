@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
+import type { RuntimeSnapshot } from "@pi-frame/session-driver/runtime-types";
+import { Check } from "lucide-react";
+import { ChevronDownIcon, ModelIcon, ReasoningIcon } from "./icons";
 import {
   buildModelOptions,
   MODEL_OPTIONS_EMPTY_TITLE,
   THINKING_OPTIONS,
   type ComposerModelOption,
 } from "./composer-commands";
+import { useTranslation } from "react-i18next";
 
 interface ModelSelectorProps {
   readonly runtime: RuntimeSnapshot | undefined;
@@ -38,6 +41,7 @@ export function ModelSelector({
   onSetModel,
   onSetThinking,
 }: ModelSelectorProps) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState<OpenDropdown>("none");
   const [modelFilter, setModelFilter] = useState("");
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -60,6 +64,13 @@ export function ModelSelector({
   const shouldRenderModelControl = hasModelControl || showEmptyModelControl;
   const modelBadgeLabel = provider && modelId ? `${provider}:${modelId}` : hasAvailableModelOptions ? unselectedModelLabel : emptyModelLabel;
   const noMatchingModels = hasAvailableModelOptions && modelFilter.trim().length > 0 && groupedModels.length === 0;
+  const currentModel = runtime?.models.find((model) => model.providerId === provider && model.modelId === modelId);
+  const thinkingOptions = useMemo(
+    () => currentModel?.thinkingLevels?.length
+      ? THINKING_OPTIONS.filter((option) => currentModel.thinkingLevels?.includes(option.value as NonNullable<RuntimeSnapshot["settings"]["defaultThinkingLevel"]>))
+      : THINKING_OPTIONS,
+    [currentModel],
+  );
 
   useEffect(() => {
     if (open === "none") {
@@ -97,21 +108,26 @@ export function ModelSelector({
         <span className="model-selector__anchor">
           <button
             className="model-selector__badge"
+            aria-expanded={open === "model"}
+            aria-haspopup="menu"
             type="button"
             disabled={disabled}
             onClick={() => setOpen(open === "model" ? "none" : "model")}
           >
-            {modelBadgeLabel}
+            <span className="composer-select__icon" aria-hidden="true"><ModelIcon /></span>
+            <span className="composer-select__label">{modelBadgeLabel}</span>
+            <span className="composer-select__chevron" aria-hidden="true"><ChevronDownIcon /></span>
           </button>
           {open === "model" ? (
             <div
               className={`model-selector__dropdown ${dropdownPlacement === "below" ? "model-selector__dropdown--below" : ""}`}
+              role="menu"
               onWheel={(event) => event.stopPropagation()}
             >
               <div className="model-selector__filter">
                 <input
                   className="model-selector__filter-input"
-                  placeholder="Filter models..."
+                  placeholder={t("modelSelector.filter")}
                   value={modelFilter}
                   onChange={(e) => setModelFilter(e.target.value)}
                   autoFocus
@@ -125,8 +141,10 @@ export function ModelSelector({
                     return (
                       <button
                         className={`model-selector__item${isActive ? " model-selector__item--active" : ""}`}
+                        aria-checked={isActive}
                         key={`${option.providerId}:${option.modelId}`}
                         type="button"
+                        role="menuitemradio"
                         onClick={() => {
                           if (!isActive) {
                             onSetModel(option.providerId, option.modelId);
@@ -135,7 +153,7 @@ export function ModelSelector({
                         }}
                       >
                         <span className="model-selector__item-label">{option.label}</span>
-                        {isActive ? <span className="model-selector__item-meta">active</span> : null}
+                        <span className="model-selector__item-check" aria-hidden="true">{isActive ? <Check /> : null}</span>
                       </button>
                     );
                   })}
@@ -144,9 +162,9 @@ export function ModelSelector({
               {groupedModels.length === 0 ? (
                 <>
                   <div className="model-selector__group-title">
-                    {noMatchingModels ? "No matching models" : emptyModelTitle}
+                    {noMatchingModels ? t("modelSelector.noMatching") : emptyModelTitle}
                   </div>
-                  {noMatchingModels ? <div className="model-selector__empty">Try a different filter.</div> : null}
+                  {noMatchingModels ? <div className="model-selector__empty">{t("modelSelector.tryDifferentFilter")}</div> : null}
                 </>
               ) : null}
             </div>
@@ -157,25 +175,32 @@ export function ModelSelector({
         <span className="model-selector__anchor">
           <button
             className="model-selector__badge"
+            aria-expanded={open === "thinking"}
+            aria-haspopup="menu"
             type="button"
             disabled={disabled}
             onClick={() => setOpen(open === "thinking" ? "none" : "thinking")}
           >
-            {thinkingLevel}
+            <span className="composer-select__icon" aria-hidden="true"><ReasoningIcon /></span>
+            <span className="composer-select__label">{thinkingLevelLabel(thinkingLevel, t)}</span>
+            <span className="composer-select__chevron" aria-hidden="true"><ChevronDownIcon /></span>
           </button>
           {open === "thinking" ? (
             <div
               className={`model-selector__dropdown ${dropdownPlacement === "below" ? "model-selector__dropdown--below" : ""}`}
+              role="menu"
               onWheel={(event) => event.stopPropagation()}
             >
-              <div className="model-selector__group-title">Thinking Level</div>
-              {THINKING_OPTIONS.map((option) => {
+              <div className="model-selector__group-title">{t("modelSelector.thinkingLevel")}</div>
+                {thinkingOptions.map((option) => {
                 const isActive = option.value === thinkingLevel;
                 return (
                   <button
                     className={`model-selector__item${isActive ? " model-selector__item--active" : ""}`}
+                    aria-checked={isActive}
                     key={option.value}
                     type="button"
+                    role="menuitemradio"
                     onClick={() => {
                       if (!isActive) {
                         onSetThinking(option.value);
@@ -183,8 +208,9 @@ export function ModelSelector({
                       setOpen("none");
                     }}
                   >
-                    <span className="model-selector__item-label">{option.label}</span>
+                    <span className="model-selector__item-label">{thinkingLevelLabel(option.value, t)}</span>
                     <span className="model-selector__item-meta">{option.description}</span>
+                    <span className="model-selector__item-check" aria-hidden="true">{isActive ? <Check /> : null}</span>
                   </button>
                 );
               })}
@@ -194,6 +220,10 @@ export function ModelSelector({
       ) : null}
     </span>
   );
+}
+
+function thinkingLevelLabel(value: string, t: (key: string) => string): string {
+  return t(`modelSelector.thinking.${value}`);
 }
 
 interface ModelGroup {

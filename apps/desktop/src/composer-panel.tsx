@@ -1,6 +1,6 @@
 import { type ClipboardEvent, type Dispatch, type DragEvent, type KeyboardEvent, type RefObject, type SetStateAction } from "react";
-import type { RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
-import type { ComposerAttachment, QueuedComposerMessage, SessionRecord } from "./desktop-state";
+import type { RuntimeSnapshot } from "@pi-frame/session-driver/runtime-types";
+import type { CollaborationMode, ComposerAttachment, QueuedComposerMessage, SessionRecord } from "./desktop-state";
 import type { MentionOption } from "./hooks/use-mention-menu";
 import { ArrowUpIcon, PlusIcon, StopSquareIcon } from "./icons";
 import type {
@@ -13,10 +13,12 @@ import { ComposerSurface } from "./composer-surface";
 import { ModelOnboardingNoticeBanner } from "./model-onboarding-notice";
 import type { ModelOnboardingState, ModelOnboardingSettingsSection } from "./model-onboarding";
 import { ModelSelector } from "./model-selector";
-import type { ExtensionDockModel } from "./extension-session-ui";
+import { VoiceInput } from "./voice-input";
+import { useTranslation } from "react-i18next";
 
 interface ComposerPanelProps {
   readonly selectedSession: SessionRecord;
+  readonly collaborationMode?: CollaborationMode;
   readonly lastError?: string;
   readonly runtime?: RuntimeSnapshot;
   readonly activeSlashCommand?: ComposerSlashCommand;
@@ -60,13 +62,12 @@ interface ComposerPanelProps {
   readonly selectedMentionIndex: number;
   readonly onSelectMention: (option: MentionOption) => void;
   readonly onEnableMentionExtension: (option: Extract<MentionOption, { kind: "extension" }>) => void;
-  readonly extensionDock?: ExtensionDockModel;
-  readonly extensionDockExpanded: boolean;
-  readonly onToggleExtensionDock: () => void;
+  readonly onTextareaHeightChange: () => void;
 }
 
 export function ComposerPanel({
   selectedSession,
+  collaborationMode = "default",
   lastError,
   runtime,
   activeSlashCommand,
@@ -110,10 +111,9 @@ export function ComposerPanel({
   selectedMentionIndex,
   onSelectMention,
   onEnableMentionExtension,
-  extensionDock,
-  extensionDockExpanded,
-  onToggleExtensionDock,
+  onTextareaHeightChange,
 }: ComposerPanelProps) {
+  const { t } = useTranslation();
   const hasComposerInput = composerDraft.trim().length > 0 || attachments.length > 0;
   const primaryActionIsStop = selectedSession.status === "running" && !hasComposerInput;
 
@@ -158,18 +158,20 @@ export function ComposerPanel({
           onEnableMentionExtension={onEnableMentionExtension}
           textareaLabel="Composer"
           textareaTestId="composer"
-          textareaPlaceholder="Ask pi to inspect the repo, run a fix, or continue the current thread..."
-          extensionDock={extensionDock}
-          extensionDockExpanded={extensionDockExpanded}
-          onToggleExtensionDock={onToggleExtensionDock}
+          textareaPlaceholder={collaborationMode === "plan"
+            ? "Describe your task to generate a plan..."
+            : "Ask pi to inspect the repo, run a fix, or continue the current thread..."}
+          onTextareaHeightChange={onTextareaHeightChange}
           footer={(
             <div className="composer__footer">
               <div className="composer__footer-row">
                 <div className="composer__hint">
-                  {selectedSession.status === "running"
-                    ? `${runningLabel} · Enter to queue · Cmd+Enter to steer`
-                    : "Enter to send · Shift+Enter for newline"}
-                  {" · "}
+                  {collaborationMode === "plan" ? (
+                    <span className="composer__mode" data-testid="plan-mode-indicator">Plan</span>
+                  ) : null}
+                  {selectedSession.status === "running" ? (
+                    <span>{`${runningLabel} · Enter to queue · Cmd+Enter to steer · `}</span>
+                  ) : null}
                   <ModelSelector
                     runtime={runtime}
                     provider={provider}
@@ -183,8 +185,9 @@ export function ComposerPanel({
                   />
                 </div>
                 <div className="composer__actions">
+                  <VoiceInput value={composerDraft} onChange={setComposerDraft} textareaRef={composerRef} />
                   <button
-                    aria-label="Attach files"
+                    aria-label={t("composer.attachFiles")}
                     className="icon-button composer__attach"
                     type="button"
                     onClick={onPickAttachments}
@@ -192,7 +195,7 @@ export function ComposerPanel({
                     <PlusIcon />
                   </button>
                   <button
-                    aria-label={primaryActionIsStop ? "Stop run" : "Send message"}
+                    aria-label={primaryActionIsStop ? t("composer.stopRun") : t("composer.send")}
                     className="button button--primary button--cta-icon"
                     data-testid="send"
                     type="button"

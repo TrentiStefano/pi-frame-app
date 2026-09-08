@@ -1,35 +1,26 @@
-import type { HostUiRequest, SessionConfig } from "@pi-gui/session-driver";
-import type { ModelSettingsSnapshot, RuntimeCommandRecord, RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
-import type { SessionSchemaInfo } from "@pi-gui/pi-sdk-driver";
-export type { SessionSchemaInfo } from "@pi-gui/pi-sdk-driver";
+import type { HostUiRequest, SessionConfig } from "@pi-frame/session-driver";
+import type { ModelSettingsSnapshot, RuntimeCommandRecord, RuntimeSnapshot } from "@pi-frame/session-driver/runtime-types";
+import type { SessionSchemaInfo } from "@pi-frame/pi-sdk-driver";
+export type { SessionSchemaInfo } from "@pi-frame/pi-sdk-driver";
 export type SessionStatus = "idle" | "running" | "failed";
 export type { SessionRole, TimelineToolCall, TranscriptMessage } from "./timeline-types";
 import type { TranscriptMessage } from "./timeline-types";
+import { defaultShortcutBindings, type ShortcutBindings } from "./keyboard-shortcuts";
+import type { BrowserElementAttachment } from "./browser-types";
+import type { CustomTheme } from "./theme/types";
+export type { BrowserElementAttachment } from "./browser-types";
 
 export type AppView = "threads" | "new-thread" | "skills" | "extensions" | "settings";
 export type WorkspaceKind = "primary" | "worktree";
 export type WorktreeStatus = "ready" | "missing" | "error";
 export type NewThreadEnvironment = "local" | "worktree";
-export type ThemeMode = "system" | "light" | "dark";
-export const themePresetIds = [
-  "default",
-  "catppuccin",
-  "tokyo-night",
-  "nord",
-  "dracula",
-  "gruvbox",
-  "github",
-  "vscode",
-] as const;
-export type ThemePresetId = (typeof themePresetIds)[number];
+export type ThemeMode = "light" | "dark";
+export type AppLanguage = "en" | "zh-CN";
+export type CollaborationMode = "default" | "plan";
 export type ModelSettingsScopeMode = "app-global" | "per-repo";
 
 export function isThemeMode(value: unknown): value is ThemeMode {
-  return value === "system" || value === "light" || value === "dark";
-}
-
-export function isThemePresetId(value: unknown): value is ThemePresetId {
-  return typeof value === "string" && themePresetIds.includes(value as ThemePresetId);
+  return value === "light" || value === "dark";
 }
 export type ComposerDraftSyncSource =
   | "state"
@@ -63,7 +54,7 @@ export interface ComposerFileAttachment {
   readonly sizeBytes?: number;
 }
 
-export type ComposerAttachment = ComposerImageAttachment | ComposerFileAttachment;
+export type ComposerAttachment = ComposerImageAttachment | ComposerFileAttachment | BrowserElementAttachment;
 
 export type QueuedComposerMessageMode = "steer" | "followUp";
 
@@ -87,6 +78,9 @@ export interface SessionRecord {
   readonly status: SessionStatus;
   readonly runningSince?: string;
   readonly hasUnseenUpdate: boolean;
+  /** Renderer freshness fence for session metadata patches. */
+  readonly metadataRevision?: number;
+  readonly activeAssistantMessageId?: string;
   readonly config?: SessionConfig;
 }
 
@@ -183,10 +177,20 @@ export interface SetChildSupervisionLoopInput {
   readonly gate: Extract<OrchestrationSupervisionGate, "continue" | "stop">;
 }
 
+export interface AssistantStreamCursor {
+  readonly runId?: string;
+  readonly assistantMessageId: string;
+  readonly sequence: number;
+}
+
 export interface SelectedTranscriptRecord {
   readonly workspaceId: string;
   readonly sessionId: string;
+  /** Monotonic host revision used to reject stale detached snapshots. */
+  readonly revision: number;
   readonly transcript: readonly TranscriptMessage[];
+  readonly streamCursor?: AssistantStreamCursor;
+  readonly streamCursors?: readonly AssistantStreamCursor[];
   // Session-file schema-version skew, when known. `writtenByNewerRuntime` drives the version-skew
   // notice; undefined until the (async, static-per-session) header read resolves.
   readonly schemaInfo?: SessionSchemaInfo;
@@ -263,6 +267,7 @@ export type StartThreadInput = {
   readonly provider?: string;
   readonly modelId?: string;
   readonly thinkingLevel?: string;
+  readonly collaborationMode?: CollaborationMode;
 };
 
 export type ForkThreadPosition = "before" | "at" | "after";
@@ -288,11 +293,6 @@ export interface RemoveWorktreeInput {
   readonly worktreeId: string;
 }
 
-export interface StartupDiagnostic {
-  readonly scope: "application" | "workspace";
-  readonly message: string;
-  readonly workspacePath?: string;
-}
 
 export interface DesktopAppState {
   readonly workspaces: readonly WorkspaceRecord[];
@@ -309,21 +309,25 @@ export interface DesktopAppState {
   readonly runtimeByWorkspace: Readonly<Record<string, RuntimeSnapshot>>;
   readonly sessionCommandsBySession: Readonly<Record<string, readonly RuntimeCommandRecord[]>>;
   readonly sessionExtensionUiBySession: Readonly<Record<string, SessionExtensionUiStateRecord>>;
+  readonly collaborationModeBySession: Readonly<Record<string, CollaborationMode>>;
   readonly extensionCommandCompatibilityByWorkspace: Readonly<Record<string, readonly ExtensionCommandCompatibilityRecord[]>>;
   readonly orchestrationChildren: readonly OrchestrationChildThread[];
   readonly notificationPreferences: NotificationPreferences;
+  readonly appLanguage: AppLanguage;
   readonly integratedTerminalShell: string;
+  readonly shortcutBindings: ShortcutBindings;
   readonly lastViewedAtBySession: Readonly<Record<string, string>>;
   readonly pinnedAtBySession: Readonly<Record<string, string>>;
   readonly pinnedSessionOrder: readonly string[];
   readonly workspaceOrder: readonly string[];
+  readonly collapsedWorkspaceIds: readonly string[];
   readonly modelSettingsScopeMode: ModelSettingsScopeMode;
   readonly globalModelSettings: ModelSettingsSnapshot;
   readonly themeMode: ThemeMode;
-  readonly themePresetId: ThemePresetId;
+  readonly themeId: string;
+  readonly customThemes: readonly CustomTheme[];
   readonly sidebarCollapsed: boolean;
-  readonly enableTransparency: boolean;
-  readonly startupDiagnostics: readonly StartupDiagnostic[];
+  readonly computerUseEnabled: boolean;
   readonly revision: number;
   readonly lastError?: string;
 }
@@ -353,6 +357,7 @@ export function createEmptyDesktopAppState(): DesktopAppState {
     runtimeByWorkspace: {},
     sessionCommandsBySession: {},
     sessionExtensionUiBySession: {},
+    collaborationModeBySession: {},
     extensionCommandCompatibilityByWorkspace: {},
     orchestrationChildren: [],
     notificationPreferences: {
@@ -360,20 +365,23 @@ export function createEmptyDesktopAppState(): DesktopAppState {
       backgroundFailure: true,
       attentionNeeded: true,
     },
+    appLanguage: "en",
     integratedTerminalShell: "",
+    shortcutBindings: defaultShortcutBindings,
     lastViewedAtBySession: {},
     pinnedAtBySession: {},
     pinnedSessionOrder: [],
     workspaceOrder: [],
+    collapsedWorkspaceIds: [],
     modelSettingsScopeMode: "app-global",
     globalModelSettings: {
       enabledModelPatterns: [],
     },
-    themeMode: "system",
-    themePresetId: "default",
+    themeMode: "light",
+    themeId: "light",
+    customThemes: [],
     sidebarCollapsed: false,
-    enableTransparency: false,
-    startupDiagnostics: [],
+    computerUseEnabled: false,
     revision: 0,
   };
 }

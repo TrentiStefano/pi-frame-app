@@ -1,4 +1,4 @@
-import type { HostUiRequest } from "@pi-gui/session-driver";
+import type { HostUiRequest } from "@pi-frame/session-driver";
 
 export interface ExtensionUiWidgetState {
   readonly key: string;

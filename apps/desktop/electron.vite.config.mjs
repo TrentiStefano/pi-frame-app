@@ -7,7 +7,8 @@ import tsconfigPaths from "vite-tsconfig-paths";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = __dirname;
 const pathsProject = path.resolve(projectRoot, "tsconfig.paths.json");
-const devPort = Number(process.env.PI_APP_DEV_PORT ?? "5173");
+const configuredDevPort = process.env.PI_APP_DEV_PORT?.trim();
+const devPort = Number(configuredDevPort || "5173");
 export default defineConfig(({ command }) => {
   const cleanOutputs = command === "build";
 
@@ -20,7 +21,9 @@ export default defineConfig(({ command }) => {
         rollupOptions: {
           input: {
             main: path.resolve(projectRoot, "electron/main.ts"),
+            "voice-recognition-worker": path.resolve(projectRoot, "electron/voice-recognition-worker.ts"),
           },
+          external: ["sherpa-onnx-node"],
         },
       },
     },
@@ -32,6 +35,7 @@ export default defineConfig(({ command }) => {
         rollupOptions: {
           input: {
             preload: path.resolve(projectRoot, "electron/preload.ts"),
+            "browser-page": path.resolve(projectRoot, "electron/browser-page-preload.ts"),
           },
         },
       },
@@ -42,7 +46,10 @@ export default defineConfig(({ command }) => {
       plugins: [react(), tsconfigPaths({ projects: [pathsProject] })],
       server: {
         port: devPort,
-        strictPort: true,
+        strictPort: Boolean(configuredDevPort),
+      },
+      worker: {
+        format: "es",
       },
       build: {
         outDir: "out/renderer",

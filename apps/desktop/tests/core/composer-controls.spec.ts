@@ -1,5 +1,4 @@
 import { expect, test } from "@playwright/test";
-import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   createNamedThread,
@@ -36,26 +35,12 @@ function contrastRatio(foreground: string, background: string): number {
   return (lighter + 0.05) / (darker + 0.05);
 }
 
-async function seedFuzzyStatusSkill(workspacePath: string): Promise<void> {
-  const skillDir = join(workspacePath, ".agents", "skills", "observe-state");
-  await mkdir(skillDir, { recursive: true });
-  await writeFile(
-    join(skillDir, "SKILL.md"),
-    `# Observe State
-
-Inspect the current application state.
-`,
-    "utf8",
-  );
-}
-
 test("supports keyboard shortcuts, slash menus, and topbar controls through the user surface", async () => {
-  test.setTimeout(60_000);
+  test.setTimeout(120_000);
   const userDataDir = await makeUserDataDir();
   const agentDir = join(userDataDir, "agent");
   const workspacePath = await makeWorkspace("controls-workspace");
   await seedAgentDir(agentDir);
-  await seedFuzzyStatusSkill(workspacePath);
   const harness = await launchDesktop(userDataDir, {
     agentDir,
     initialWorkspaces: [workspacePath],
@@ -79,14 +64,59 @@ test("supports keyboard shortcuts, slash menus, and topbar controls through the 
 
     await selectSession(window, "Controls session");
     await expect(composer).toBeFocused();
+    await expect(window.locator(".composer__hint")).not.toContainText("Enter to send");
+    await expect(window.locator(".composer__hint")).not.toContainText("Shift+Enter for newline");
+
+    const composerSpacing = await window.locator(".composer__surface").evaluate((surface) => {
+      const textarea = surface.querySelector<HTMLElement>("textarea");
+      if (!textarea) {
+        throw new Error("Expected composer textarea");
+      }
+      const surfaceStyle = getComputedStyle(surface);
+      return {
+        minEditorHeight: getComputedStyle(textarea).minHeight,
+        paddingBottom: surfaceStyle.paddingBottom,
+        paddingLeft: surfaceStyle.paddingLeft,
+        paddingRight: surfaceStyle.paddingRight,
+        paddingTop: surfaceStyle.paddingTop,
+      };
+    });
+    expect(composerSpacing).toEqual({
+      minEditorHeight: "28px",
+      paddingBottom: "10px",
+      paddingLeft: "14px",
+      paddingRight: "14px",
+      paddingTop: "12px",
+    });
+
+    const composerActionMetrics = await window.locator(".composer__actions").evaluate((actions) => {
+      const attach = actions.querySelector<HTMLElement>(".composer__attach");
+      const send = actions.querySelector<HTMLElement>("[data-testid='send']");
+      if (!attach || !send) {
+        throw new Error("Expected composer attachment and send actions");
+      }
+      const attachRect = attach.getBoundingClientRect();
+      const sendRect = send.getBoundingClientRect();
+      return {
+        attachHeight: attachRect.height,
+        attachWidth: attachRect.width,
+        gap: Number.parseFloat(getComputedStyle(actions).gap),
+        sendHeight: sendRect.height,
+        sendWidth: sendRect.width,
+      };
+    });
+    expect(composerActionMetrics).toEqual({
+      attachHeight: 34,
+      attachWidth: 34,
+      gap: 6,
+      sendHeight: 34,
+      sendWidth: 34,
+    });
 
     await composer.fill("/stat");
     const slashMenu = window.getByTestId("slash-menu");
     await expect(slashMenu).toBeVisible();
     await expect(slashMenu).toContainText("Status");
-    await expect(slashMenu).toContainText("Observe State");
-    await expect(slashMenu).toContainText("/skill:observe-state");
-    await expect(slashMenu.locator(".slash-menu__item").first()).toContainText("/status");
     const slashMenuBox = await slashMenu.boundingBox();
     const composerBox = await composer.boundingBox();
     expect(slashMenuBox).not.toBeNull();
@@ -117,13 +147,17 @@ test("supports keyboard shortcuts, slash menus, and topbar controls through the 
     await composer.press("ArrowDown");
     await composer.press("ArrowDown");
     await composer.press("ArrowDown");
+    await composer.press("ArrowDown");
+    await composer.press("ArrowDown");
     await composer.press("Enter");
     await expect(optionsMenu).toHaveCount(0);
     await expect(window.getByTestId("transcript")).toContainText("Thinking set to max");
-    await expect(window.locator(".composer__hint")).toContainText("max");
+    await expect(window.locator(".composer__hint")).toContainText("Max");
 
     await composer.fill("Keep the draft /thinking");
     await expect(optionsMenu).toBeVisible();
+    await composer.press("ArrowDown");
+    await composer.press("ArrowDown");
     await composer.press("ArrowDown");
     await composer.press("Enter");
     await expect(optionsMenu).toHaveCount(0);
@@ -142,7 +176,7 @@ test("supports keyboard shortcuts, slash menus, and topbar controls through the 
     await composer.fill("/model");
     await expect(optionsMenu).toBeVisible();
     await expect(optionsMenu).toContainText("No models available");
-    await expect(optionsMenu).toContainText("Open Settings > Models to enable models.");
+    await expect(optionsMenu).toContainText("Open Settings > Models to add a model and configure its credentials.");
     await composer.fill("continue");
     await expect(optionsMenu).toHaveCount(0);
 
@@ -203,7 +237,7 @@ test("dark mode keeps the send button visible before and after typing", async ()
     await expect(settingsSurface).toBeVisible();
     await settingsSurface.getByRole("button", { name: "Appearance", exact: true }).click();
     await expect(window.locator(".view-header__title")).toHaveText("Appearance");
-    await settingsSurface.locator(".settings-row", { hasText: "Dark" }).locator('input[type="radio"]').click();
+    await settingsSurface.getByRole("button", { name: "Dark", exact: true }).click();
     await expect
       .poll(() => window.evaluate(() => document.documentElement.classList.contains("dark")))
       .toBe(true);

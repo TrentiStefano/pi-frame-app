@@ -12,6 +12,7 @@ import {
 } from "react";
 import {
   type AppView,
+  type CollaborationMode,
   type ComposerAttachment,
   type DesktopAppState,
   type NewThreadEnvironment,
@@ -27,6 +28,12 @@ import {
 } from "../composer-attachments";
 import { buildModelOptions, parseTreeComposerCommand } from "../composer-commands";
 import type { PiDesktopApi } from "../ipc";
+import {
+  defaultShortcutBindings,
+  insertTextAtSelection,
+  shortcutMatches,
+  type ShortcutBindings,
+} from "../keyboard-shortcuts";
 import { deriveModelOnboardingState } from "../model-onboarding";
 import { getEffectiveModelRuntime } from "../model-settings";
 import type { SettingsSection } from "../settings-view";
@@ -44,6 +51,7 @@ interface UseNewThreadControllerParams {
   readonly selectedWorkspace: WorkspaceRecord | undefined;
   readonly expandWorkspace: (workspaceId: string) => void;
   readonly openSettings: (workspaceId?: string, section?: SettingsSection) => void;
+  readonly shortcutBindings?: ShortcutBindings;
 }
 
 export function useNewThreadController(params: UseNewThreadControllerParams) {
@@ -57,6 +65,7 @@ export function useNewThreadController(params: UseNewThreadControllerParams) {
     selectedWorkspace,
     expandWorkspace,
     openSettings,
+    shortcutBindings = defaultShortcutBindings,
   } = params;
 
   const [pendingWorkspaceId, setPendingWorkspaceId] = useState("");
@@ -67,9 +76,12 @@ export function useNewThreadController(params: UseNewThreadControllerParams) {
   const [provider, setProvider] = useState<string | undefined>();
   const [modelId, setModelId] = useState<string | undefined>();
   const [thinkingLevel, setThinkingLevel] = useState<string | undefined>();
+  const [collaborationMode, setCollaborationMode] = useState<CollaborationMode>("default");
   const [composerError, setComposerError] = useState<string | undefined>();
+  const [isStarting, setIsStarting] = useState(false);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const previousActiveViewRef = useRef<AppView | null>(null);
+  const startInFlightRef = useRef(false);
 
   const workspace = rootWorkspaceOptions.find((entry) => entry.id === rootWorkspaceId) ?? rootWorkspaceOptions[0];
   const runtime = snapshot ? getEffectiveModelRuntime(snapshot, workspace) : undefined;
@@ -130,6 +142,7 @@ export function useNewThreadController(params: UseNewThreadControllerParams) {
       setProvider(undefined);
       setModelId(undefined);
       setThinkingLevel(undefined);
+      setCollaborationMode("default");
       setComposerError(undefined);
     },
     [rootWorkspace?.id, rootWorkspaceOptions, snapshot, visibleWorkspaces],
@@ -179,6 +192,7 @@ export function useNewThreadController(params: UseNewThreadControllerParams) {
       setModelId(nextModelId);
     },
     onSelectThinkingOption: setThinkingLevel,
+    onTogglePlanMode: () => setCollaborationMode((current) => current === "plan" ? "default" : "plan"),
     onSelectLoginProvider: (providerId) => {
       if (!api || !workspace) {
         return;
@@ -216,7 +230,7 @@ export function useNewThreadController(params: UseNewThreadControllerParams) {
   });
 
   const startThread = useCallback(() => {
-    if (!api) {
+    if (!api || startInFlightRef.current) {
       return;
     }
     if (!rootWorkspaceId || (!prompt.trim() && attachments.length === 0)) {
@@ -242,19 +256,32 @@ export function useNewThreadController(params: UseNewThreadControllerParams) {
       provider: resolvedProvider,
       modelId: resolvedModelId,
       thinkingLevel: resolvedThinkingLevel,
+      collaborationMode,
     };
+    startInFlightRef.current = true;
+    setIsStarting(true);
     expandWorkspace(rootWorkspaceId);
-    void updateSnapshot(api, setSnapshot, () => api.startThread(input)).then(() => {
-      setPrompt("");
-      setAttachments([]);
-      setProvider(undefined);
-      setModelId(undefined);
-      setThinkingLevel(undefined);
-      setEnvironment("local");
-    });
+    void updateSnapshot(api, setSnapshot, () => api.startThread(input))
+      .then(() => {
+        setPrompt("");
+        setAttachments([]);
+        setProvider(undefined);
+        setModelId(undefined);
+        setThinkingLevel(undefined);
+        setCollaborationMode("default");
+        setEnvironment("local");
+      })
+      .catch((error: unknown) => {
+        setComposerError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        startInFlightRef.current = false;
+        setIsStarting(false);
+      });
   }, [
     api,
     attachments,
+    collaborationMode,
     environment,
     expandWorkspace,
     modelOnboarding.requiresModelSelection,
@@ -304,7 +331,21 @@ export function useNewThreadController(params: UseNewThreadControllerParams) {
         return;
       }
 
-      if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
+      if (event.nativeEvent.isComposing) {
+        return;
+      }
+
+      if (shortcutMatches(event, shortcutBindings.newLine, api?.platform ?? "win32")) {
+        if (event.key !== "Enter") {
+          event.preventDefault();
+          const insertion = insertTextAtSelection(event.currentTarget, prompt, "\n");
+          setPrompt(insertion.value);
+          window.requestAnimationFrame(() => event.currentTarget.setSelectionRange(insertion.cursor, insertion.cursor));
+        }
+        return;
+      }
+
+      if (!shortcutMatches(event, shortcutBindings.sendMessage, api?.platform ?? "win32")) {
         return;
       }
 
@@ -318,7 +359,7 @@ export function useNewThreadController(params: UseNewThreadControllerParams) {
 
       startThread();
     },
-    [api, appendAttachment, attachments.length, mentionMenu, modelOnboarding.requiresModelSelection, prompt, slashMenu, startThread],
+    [api, appendAttachment, attachments.length, mentionMenu, modelOnboarding.requiresModelSelection, prompt, shortcutBindings, slashMenu, startThread],
   );
 
   useEffect(() => {
@@ -368,7 +409,9 @@ export function useNewThreadController(params: UseNewThreadControllerParams) {
       environment,
       prompt,
       attachments,
+      collaborationMode,
       composerError,
+      isStarting,
       resolvedProvider,
       resolvedModelId,
       resolvedThinkingLevel,
@@ -399,7 +442,9 @@ export function useNewThreadController(params: UseNewThreadControllerParams) {
       environment,
       prompt,
       attachments,
+      collaborationMode,
       composerError,
+      isStarting,
       resolvedProvider,
       resolvedModelId,
       resolvedThinkingLevel,

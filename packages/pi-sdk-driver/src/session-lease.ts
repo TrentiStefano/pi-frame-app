@@ -1,5 +1,4 @@
-import { rm, stat } from "node:fs/promises";
-import { readFile } from "node:fs/promises";
+import { readFile, rm, stat } from "node:fs/promises";
 import { hostname } from "node:os";
 import { writeJsonFileAtomic } from "./atomic-write.js";
 import { isMissingFileError } from "./json-catalog-store.js";
@@ -89,6 +88,9 @@ export function isSameHolder(info: LeaseInfo | LeaseIdentity, self: LeaseIdentit
 export function defaultIsPidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) {
     return false;
+  }
+  if (pid === process.pid) {
+    return true;
   }
   try {
     process.kill(pid, 0);

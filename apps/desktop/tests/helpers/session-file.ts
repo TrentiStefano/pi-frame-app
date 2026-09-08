@@ -10,6 +10,20 @@ export interface SeededSessionFileMessage {
   readonly role: "user" | "assistant";
   readonly text: string;
   readonly timestampMs?: number;
+  readonly usage?: {
+    readonly input?: number;
+    readonly output?: number;
+    readonly cacheRead?: number;
+    readonly cacheWrite?: number;
+    readonly totalTokens?: number;
+    readonly cost?: {
+      readonly input?: number;
+      readonly output?: number;
+      readonly cacheRead?: number;
+      readonly cacheWrite?: number;
+      readonly total?: number;
+    };
+  };
 }
 
 /** Resolve a session's pi JSONL file path from the app's catalog. */
@@ -64,7 +78,7 @@ export async function appendMessagesToSessionFile(
               api: "test",
               provider: "test",
               model: "test",
-              usage: {
+              usage: message.usage ?? {
                 input: 0,
                 output: 0,
                 cacheRead: 0,

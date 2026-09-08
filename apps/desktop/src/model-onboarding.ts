@@ -1,7 +1,7 @@
-import type { RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
+import type { RuntimeSnapshot } from "@pi-frame/session-driver/runtime-types";
 import { buildModelOptions } from "./composer-commands";
 
-export type ModelOnboardingSettingsSection = "models" | "providers";
+export type ModelOnboardingSettingsSection = "models";
 
 export interface ModelOnboardingNotice {
   readonly title: string;
@@ -31,7 +31,6 @@ export function deriveModelOnboardingState(
   const selectableModels = buildModelOptions(runtime);
   const selectableSet = new Set(selectableModels.map((model) => `${model.providerId}:${model.modelId}`));
   const hasSelectableModels = selectableModels.length > 0;
-  const connectedProviderCount = runtime?.providers.filter((provider) => provider.hasAuth).length ?? 0;
   const settingsDefault = {
     provider: runtime?.settings.defaultProvider,
     modelId: runtime?.settings.defaultModelId,
@@ -47,23 +46,13 @@ export function deriveModelOnboardingState(
       requiresModelSelection: true,
       unselectedModelLabel: "No models available",
       emptyModelTitle: "No models available",
-      emptyModelDescription:
-        connectedProviderCount > 0
-          ? "Open Settings > Models to enable models."
-          : "Open Settings > Providers to connect a provider and make models available.",
-      notice: connectedProviderCount > 0
-        ? {
-            title: "No models available",
-            description: "All available models are currently disabled. Open Settings > Models to enable models.",
-            actionLabel: "Open Settings > Models",
-            actionSection: "models",
-          }
-        : {
-            title: "No models available",
-            description: "Connect a provider in Settings > Providers before choosing a model or setting a default.",
-            actionLabel: "Open Settings > Providers",
-            actionSection: "providers",
-          },
+      emptyModelDescription: "Open Settings > Models to add a model and configure its credentials.",
+      notice: {
+        title: "No models available",
+        description: "Add a model and configure its credentials in Settings > Models.",
+        actionLabel: "Open Settings > Models",
+        actionSection: "models",
+      },
     };
   }
 

@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { sessionKey } from "@pi-gui/pi-sdk-driver";
-import type { SessionConfig, SessionQueuedMessage, SessionRef } from "@pi-gui/session-driver";
+import { sessionKey } from "@pi-frame/pi-sdk-driver";
+import type { SessionConfig, SessionQueuedMessage, SessionRef } from "@pi-frame/session-driver";
 import type { ComposerAttachment, DesktopAppState, QueuedComposerMessage, WorkspaceSessionTarget } from "../src/desktop-state";
 import { toSessionRef } from "./app-store-utils";
 import {
   formatSessionConfigStatus,
   hasRuntimeSlashCommand,
   incompleteComposerCommandMessage,
+  parseComputerUseComposerCommand,
   parseComposerCommand,
   resolveRuntimeSlashCommand,
 } from "../src/composer-commands";
@@ -14,6 +15,7 @@ import { appendQueuedUserMessage, appendUserMessage, clearActiveAssistantMessage
 import {
   cloneComposerAttachments,
   makeActivityItem,
+  mapToRecord,
   previewFromTranscript,
   toSessionAttachments,
   toSessionQueuedMessages,
@@ -61,7 +63,15 @@ export async function addComposerAttachments(
 
   const key = sessionKey(sessionRef);
   const existing = store.sessionState.composerAttachmentsBySession.get(key) ?? [];
-  const next = [...existing, ...attachments];
+  const existingBrowserElementCount = existing.filter((attachment) => attachment.kind === "browser-element").length;
+  let remainingBrowserElements = Math.max(0, 10 - existingBrowserElementCount);
+  const accepted = attachments.filter((attachment) => {
+    if (attachment.kind !== "browser-element") return true;
+    if (remainingBrowserElements === 0) return false;
+    remainingBrowserElements -= 1;
+    return true;
+  });
+  const next = [...existing, ...accepted];
   store.sessionState.composerAttachmentsBySession.set(key, next);
   store.state = {
     ...store.state,
@@ -262,6 +272,7 @@ export async function submitComposer(
   options: {
     readonly deliverAs?: "steer" | "followUp";
     readonly allowCommands?: boolean;
+    readonly preserveComposer?: boolean;
   } = {},
 ): Promise<DesktopAppState> {
   await store.initialize();
@@ -288,20 +299,54 @@ export async function submitComposerToSession(
   options: {
     readonly deliverAs?: "steer" | "followUp";
     readonly allowCommands?: boolean;
+    readonly preserveComposer?: boolean;
   } = {},
 ): Promise<DesktopAppState> {
   const text = textInput.trim();
   const key = sessionKey(sessionRef);
+  const allowCommands = options.allowCommands ?? true;
+  const computerUseCommand = allowCommands ? parseComputerUseComposerCommand(text) : undefined;
+
+  if (computerUseCommand) {
+    if (!computerUseCommand.task) {
+      return store.withError("Add a desktop task after /computer-use.");
+    }
+    if (process.platform !== "win32" && process.platform !== "darwin") {
+      return store.withError("Computer Use is available only on Windows and macOS.");
+    }
+    if (!store.state.computerUseEnabled) {
+      await store.setComputerUseEnabled(true);
+    } else if (!hasComputerUseCommand(store, sessionRef)) {
+      store.clearExtensionUiForSession(sessionRef);
+      await store.driver.reloadSession(sessionRef);
+      await store.refreshSessionCommandsFor(sessionRef);
+    }
+    if (!hasComputerUseCommand(store, sessionRef)) {
+      return store.withError("Computer Use could not be loaded for this session. Restart the app and try again.");
+    }
+    const prompt = [
+      "Use the available Computer Use tools to operate the user's desktop and complete the following task.",
+      "Observe the relevant UI, perform the actions, and verify the result. Do not only describe manual steps.",
+      "",
+      computerUseCommand.task,
+    ].join("\n");
+    return submitComposerToSession(store, sessionRef, prompt, attachments, {
+      ...options,
+      allowCommands: false,
+    });
+  }
+
   const runtime = store.runtimeByWorkspace.get(sessionRef.workspaceId);
   const sessionCommands = store.sessionState.sessionCommandsBySession.get(sessionKey(sessionRef)) ?? [];
-  const allowCommands = options.allowCommands ?? true;
   const runtimeSlashCommand = allowCommands && hasRuntimeSlashCommand(text, runtime, sessionCommands);
   const resolvedRuntimeSlashCommand = runtimeSlashCommand
     ? resolveRuntimeSlashCommand(text, runtime, sessionCommands)
     : undefined;
 
   if (allowCommands && text.startsWith("/") && !runtimeSlashCommand) {
-    const handled = await runComposerCommand(store, sessionRef, text);
+    const handled = await runComposerCommand(store, sessionRef, text, {
+      preserveComposer: options.preserveComposer,
+    });
     if (handled) {
       return handled;
     }
@@ -358,7 +403,9 @@ export async function submitComposerToSession(
       store.sessionState.composerDraftsBySession.delete(key);
       store.sessionState.composerAttachmentsBySession.delete(key);
       store.setQueuedComposerEditState(sessionRef, undefined);
-      await store.persistComposerAttachments(key, []);
+      if (attachments.length > 0) {
+        await store.persistComposerAttachments(key, []);
+      }
       const nextSessionQueuedMessages = toSessionQueuedMessages(nextQueuedMessages);
       optimisticSteerMessage = deliverAs === "steer"
         ? nextSessionQueuedMessages.find((message) => message.id === nextMessage.id)
@@ -437,9 +484,11 @@ export async function setSessionThinkingLevel(
   });
 }
 
-export async function cancelCurrentRun(store: AppStoreInternals): Promise<DesktopAppState> {
+export async function cancelCurrentRun(
+  store: AppStoreInternals,
+  sessionRef: SessionRef | undefined = store.selectedSessionRef(),
+): Promise<DesktopAppState> {
   await store.initialize();
-  const sessionRef = store.selectedSessionRef();
   if (!sessionRef) {
     return store.emit();
   }
@@ -488,7 +537,9 @@ export async function sendMessageToSession(
   store.sessionState.sessionErrorsBySession.delete(key);
   store.sessionState.composerDraftsBySession.delete(key);
   store.sessionState.composerAttachmentsBySession.delete(key);
-  await store.persistComposerAttachments(key, []);
+  if (attachments.length > 0) {
+    await store.persistComposerAttachments(key, []);
+  }
   try {
     await store.driver.sendUserMessage(sessionRef, {
       text,
@@ -505,6 +556,12 @@ export async function sendMessageToSession(
     }
     throw error;
   }
+}
+
+function hasComputerUseCommand(store: AppStoreInternals, sessionRef: SessionRef): boolean {
+  return (store.sessionState.sessionCommandsBySession.get(sessionKey(sessionRef)) ?? []).some(
+    (command) => command.name === "computer-use",
+  );
 }
 
 function buildQueuedComposerMessage(options: {
@@ -556,6 +613,7 @@ async function runComposerCommand(
   store: AppStoreInternals,
   sessionRef: SessionRef,
   commandText: string,
+  options: { readonly preserveComposer?: boolean } = {},
 ): Promise<DesktopAppState | undefined> {
   const parsed = parseComposerCommand(commandText);
   if (!parsed) {
@@ -567,6 +625,29 @@ async function runComposerCommand(
   }
 
   const key = sessionKey(sessionRef);
+
+  if (parsed.type === "plan") {
+    const currentMode = store.sessionState.collaborationModeBySession.get(key) ?? "default";
+    const nextMode = currentMode === "plan" ? "default" : "plan";
+    store.sessionState.collaborationModeBySession.set(key, nextMode);
+    try {
+      await store.persistUiState();
+      store.clearExtensionUiForSession(sessionRef);
+      await store.driver.reloadSession(sessionRef);
+      await store.refreshSessionCommandsFor(sessionRef);
+    } catch (error) {
+      store.sessionState.collaborationModeBySession.set(key, currentMode);
+      await store.persistUiState();
+      throw error;
+    }
+    return finishComposerCommand(
+      store,
+      sessionRef,
+      key,
+      nextMode === "plan" ? "Plan mode enabled" : "Plan mode disabled",
+      { preserveComposer: options.preserveComposer },
+    );
+  }
 
   if (parsed.type === "model") {
     await store.driver.setSessionModel(sessionRef, {
@@ -640,10 +721,21 @@ function finishComposerCommand(
   sessionRef: SessionRef,
   key: string,
   label: string,
-  options: { readonly sessionTitle?: string } = {},
+  options: {
+    readonly sessionTitle?: string;
+    readonly preserveComposer?: boolean;
+  } = {},
 ): DesktopAppState {
-  store.sessionState.composerDraftsBySession.delete(key);
-  store.sessionState.composerAttachmentsBySession.delete(key);
+  if (!options.preserveComposer) {
+    store.sessionState.composerDraftsBySession.delete(key);
+    store.sessionState.composerAttachmentsBySession.delete(key);
+  }
+  const composerDraft = options.preserveComposer
+    ? store.sessionState.composerDraftsBySession.get(key) ?? ""
+    : "";
+  const composerAttachments = options.preserveComposer
+    ? cloneComposerAttachments(store.sessionState.composerAttachmentsBySession.get(key) ?? [])
+    : [];
   appendLocalActivity(store, sessionRef, label);
   const transcript = store.sessionState.transcriptCache.get(key) ?? [];
   const preview = previewFromTranscript(transcript);
@@ -666,10 +758,11 @@ function finishComposerCommand(
           }
         : workspace,
     ),
-    composerDraft: "",
+    composerDraft,
     composerDraftSyncSource: "command",
     composerDraftSyncNonce: store.allocateComposerDraftSyncNonce(),
-    composerAttachments: [],
+    composerAttachments,
+    collaborationModeBySession: mapToRecord(store.sessionState.collaborationModeBySession),
     lastError: undefined,
     revision: store.state.revision + 1,
   };

@@ -1,0 +1,4 @@
+THIRD-PARTY SOFTWARE NOTICES
+
+This desktop application distributes the pi-computer-use 0.5.0 Windows helper.
+The MIT license text is in licenses/pi-computer-use-0.5.0/LICENSE.

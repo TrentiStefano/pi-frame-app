@@ -13,6 +13,14 @@ import {
 
 export interface PiResourceLoaderOptions {
   readonly extensionFactories?: ExtensionFactory[];
+  readonly additionalSkillPaths?: string[];
+  readonly noExtensions?: boolean;
+  readonly noSkills?: boolean;
+  readonly noPromptTemplates?: boolean;
+  readonly noThemes?: boolean;
+  readonly noContextFiles?: boolean;
+  readonly systemPrompt?: string;
+  readonly appendSystemPrompt?: string[];
 }
 
 export interface PiCreateAgentSessionOptions extends CreateAgentSessionOptions {
@@ -52,15 +60,14 @@ export function createSettingsManagerWithoutNpmPackages(current: SettingsManager
 async function createAgentSessionServicesWithNpmFallback(
   cwd: string,
   agentDir: string,
-  options?: Pick<PiCreateAgentSessionOptions, "authStorage" | "settingsManager" | "modelRegistry" | "resourceLoaderOptions">,
+  options?: Pick<PiCreateAgentSessionOptions, "modelRuntime" | "settingsManager" | "resourceLoaderOptions">,
 ) {
   try {
     return await createAgentSessionServices({
       cwd,
       agentDir,
-      ...(options?.authStorage ? { authStorage: options.authStorage } : {}),
+      ...(options?.modelRuntime ? { modelRuntime: options.modelRuntime } : {}),
       ...(options?.settingsManager ? { settingsManager: options.settingsManager } : {}),
-      ...(options?.modelRegistry ? { modelRegistry: options.modelRegistry } : {}),
       ...(options?.resourceLoaderOptions ? { resourceLoaderOptions: options.resourceLoaderOptions } : {}),
     });
   } catch (error) {
@@ -83,9 +90,8 @@ async function createAgentSessionServicesWithNpmFallback(
     return createAgentSessionServices({
       cwd,
       agentDir,
-      ...(options?.authStorage ? { authStorage: options.authStorage } : {}),
+      ...(options?.modelRuntime ? { modelRuntime: options.modelRuntime } : {}),
       settingsManager: fallbackSettingsManager,
-      ...(options?.modelRegistry ? { modelRegistry: options.modelRegistry } : {}),
       ...(options?.resourceLoaderOptions ? { resourceLoaderOptions: options.resourceLoaderOptions } : {}),
     });
   }
@@ -107,6 +113,8 @@ async function createAgentSessionResultWithNpmFallback(
       ...(options?.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
       ...(options?.scopedModels ? { scopedModels: options.scopedModels } : {}),
       ...(options?.tools ? { tools: options.tools } : {}),
+      ...(options?.noTools ? { noTools: options.noTools } : {}),
+      ...(options?.excludeTools ? { excludeTools: options.excludeTools } : {}),
       ...(options?.customTools ? { customTools: options.customTools } : {}),
     })),
     services,

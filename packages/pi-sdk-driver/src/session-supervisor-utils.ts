@@ -8,12 +8,14 @@ import type {
   SessionSnapshot,
   SessionStatus,
   WorkspaceRef,
-} from "@pi-gui/session-driver";
-import type { SessionQueuedMessage } from "@pi-gui/session-driver/types";
-import type { SessionTranscriptAttachment, SessionTranscriptItem } from "./transcript.js";
+} from "@pi-frame/session-driver";
+import type { SessionQueuedMessage } from "@pi-frame/session-driver/types";
+import type { SessionMessageUsage, SessionTranscriptAttachment, SessionTranscriptItem } from "./transcript.js";
 
 const FILE_ATTACHMENT_BLOCK_START = "<pi-gui-file-attachments>";
 const FILE_ATTACHMENT_BLOCK_END = "</pi-gui-file-attachments>";
+const BROWSER_ATTACHMENT_BLOCK_START = "<pi-gui-browser-elements>";
+const BROWSER_ATTACHMENT_BLOCK_END = "</pi-gui-browser-elements>";
 
 export interface SnapshotSource {
   readonly ref: SessionRef;
@@ -52,6 +54,62 @@ export function buildSnapshot(source: SnapshotSource): SessionSnapshot {
         }
       : {}),
   };
+}
+
+export interface NormalizedToolUpdate {
+  readonly text?: string;
+  readonly progress?: number;
+  readonly details?: unknown;
+}
+
+export function normalizeToolUpdate(partialResult: unknown): NormalizedToolUpdate {
+  if (typeof partialResult === "string") {
+    return { text: partialResult };
+  }
+  if (typeof partialResult === "number" && Number.isFinite(partialResult)) {
+    return { progress: partialResult };
+  }
+  if (!isRecord(partialResult)) {
+    return {};
+  }
+
+  const details = partialResult.details;
+  const detailRecord = isRecord(details) ? details : undefined;
+  const text = toolUpdateText(partialResult.content) ?? stringProperty(detailRecord, "text");
+  const directProgress = partialResult.progress;
+  const detailProgress = detailRecord?.progress;
+  const progress =
+    typeof directProgress === "number" && Number.isFinite(directProgress)
+      ? directProgress
+      : typeof detailProgress === "number" && Number.isFinite(detailProgress)
+        ? detailProgress
+        : undefined;
+
+  return {
+    ...(text !== undefined ? { text } : {}),
+    ...(progress !== undefined ? { progress } : {}),
+    ...(details !== undefined ? { details } : {}),
+  };
+}
+
+function toolUpdateText(content: unknown): string | undefined {
+  if (typeof content === "string") {
+    return content || undefined;
+  }
+  if (!Array.isArray(content)) {
+    return undefined;
+  }
+
+  const text = content
+    .map((part) => (isRecord(part) && part.type === "text" && typeof part.text === "string" ? part.text : ""))
+    .filter((part) => part.length > 0)
+    .join("\n");
+  return text || undefined;
+}
+
+function stringProperty(record: Readonly<Record<string, unknown>> | undefined, key: string): string | undefined {
+  const value = record?.[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 export function deriveSessionConfig(sessionManager: {
@@ -210,22 +268,42 @@ export function injectFileAttachmentPreamble(
   attachments: readonly SessionAttachment[] | undefined,
 ): string {
   const files = attachments?.filter((attachment): attachment is Extract<SessionAttachment, { readonly kind: "file" }> => attachment.kind === "file") ?? [];
-  if (files.length === 0) {
+  const browserElements = attachments?.filter(
+    (attachment): attachment is Extract<SessionAttachment, { readonly kind: "browser-element" }> =>
+      attachment.kind === "browser-element",
+  ) ?? [];
+  if (files.length === 0 && browserElements.length === 0) {
     return text;
   }
 
-  const payload = JSON.stringify({
-    version: 1,
-    files: files.map((attachment) => ({
-      kind: "file" as const,
-      name: attachment.name,
-      mimeType: attachment.mimeType,
-      fsPath: attachment.fsPath,
-      ...(attachment.sizeBytes !== undefined ? { sizeBytes: attachment.sizeBytes } : {}),
-    })),
+  const blocks: string[] = [];
+  if (files.length > 0) {
+    const payload = safeJsonStringify({
+      version: 1,
+      files: files.map((attachment) => ({
+        kind: "file" as const,
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        fsPath: attachment.fsPath,
+        ...(attachment.sizeBytes !== undefined ? { sizeBytes: attachment.sizeBytes } : {}),
+      })),
+    });
+    blocks.push(`${FILE_ATTACHMENT_BLOCK_START}${payload}${FILE_ATTACHMENT_BLOCK_END}`);
+  }
+  if (browserElements.length > 0) {
+    const payload = safeJsonStringify({ version: 1, elements: browserElements });
+    blocks.push(`${BROWSER_ATTACHMENT_BLOCK_START}${payload}${BROWSER_ATTACHMENT_BLOCK_END}`);
+  }
+  const preamble = blocks.join("\n");
+  return text ? `${preamble}\n${text}` : preamble;
+}
+
+function safeJsonStringify(value: unknown): string {
+  return JSON.stringify(value).replace(/[<>&]/g, (character) => {
+    if (character === "<") return "\\u003c";
+    if (character === ">") return "\\u003e";
+    return "\\u0026";
   });
-  const block = `${FILE_ATTACHMENT_BLOCK_START}${payload}${FILE_ATTACHMENT_BLOCK_END}`;
-  return text ? `${block}\n${text}` : block;
 }
 
 export function transcriptFromMessages(messages: readonly unknown[], fallbackTimestamp = nowIso()): SessionTranscriptItem[] {
@@ -250,24 +328,97 @@ export function transcriptFromMessages(messages: readonly unknown[], fallbackTim
     }
 
     const text = messageText(message);
+    const thinking = role === "assistant" ? messageThinking(message) : undefined;
     const attachments = messageAttachments(message);
-    if (text || attachments.length > 0) {
+    const usage = role === "assistant" ? extractUsage(message) : undefined;
+    const model = role === "assistant" && typeof message.model === "string" ? message.model : undefined;
+    const provider = role === "assistant" && typeof message.provider === "string" ? message.provider : undefined;
+    const hasTextOrAttachments = Boolean(text || thinking || attachments.length > 0);
+    if (hasTextOrAttachments) {
       transcript.push({
         kind: "message",
         id: typeof message.id === "string" ? message.id : `${role}-${index}`,
         role,
         text,
+        ...(thinking ? { thinking } : {}),
         ...(attachments.length > 0 ? { attachments } : {}),
+        ...(usage ? { usage } : {}),
+        ...(model ? { model } : {}),
+        ...(provider ? { provider } : {}),
         createdAt,
       });
     }
 
     if (role === "assistant") {
-      appendToolCalls(transcript, toolIndexByCallId, message, createdAt);
+      appendToolCalls(
+        transcript,
+        toolIndexByCallId,
+        message,
+        createdAt,
+        hasTextOrAttachments ? undefined : usage,
+      );
     }
   }
 
   return transcript;
+}
+
+function extractUsage(message: Record<string, unknown>): SessionMessageUsage | undefined {
+  if (!isRecord(message.usage)) {
+    return undefined;
+  }
+  const u = message.usage;
+  const input = typeof u.input === "number" && Number.isFinite(u.input) ? u.input : undefined;
+  const output = typeof u.output === "number" && Number.isFinite(u.output) ? u.output : undefined;
+  const cacheRead = typeof u.cacheRead === "number" && Number.isFinite(u.cacheRead) ? u.cacheRead : undefined;
+  const cacheWrite = typeof u.cacheWrite === "number" && Number.isFinite(u.cacheWrite) ? u.cacheWrite : undefined;
+  const totalTokens = typeof u.totalTokens === "number" && Number.isFinite(u.totalTokens) ? u.totalTokens : undefined;
+
+  let cost: SessionMessageUsage["cost"] | undefined;
+  if (isRecord(u.cost)) {
+    const c = u.cost;
+    const costInput = typeof c.input === "number" && Number.isFinite(c.input) ? c.input : undefined;
+    const costOutput = typeof c.output === "number" && Number.isFinite(c.output) ? c.output : undefined;
+    const costCacheRead = typeof c.cacheRead === "number" && Number.isFinite(c.cacheRead) ? c.cacheRead : undefined;
+    const costCacheWrite = typeof c.cacheWrite === "number" && Number.isFinite(c.cacheWrite) ? c.cacheWrite : undefined;
+    const costTotal = typeof c.total === "number" && Number.isFinite(c.total) ? c.total : undefined;
+
+    if (
+      costInput !== undefined ||
+      costOutput !== undefined ||
+      costCacheRead !== undefined ||
+      costCacheWrite !== undefined ||
+      costTotal !== undefined
+    ) {
+      cost = {
+        ...(costInput !== undefined ? { input: costInput } : {}),
+        ...(costOutput !== undefined ? { output: costOutput } : {}),
+        ...(costCacheRead !== undefined ? { cacheRead: costCacheRead } : {}),
+        ...(costCacheWrite !== undefined ? { cacheWrite: costCacheWrite } : {}),
+        ...(costTotal !== undefined ? { total: costTotal } : {}),
+      };
+    }
+  }
+
+  if (
+    input === undefined &&
+    output === undefined &&
+    cacheRead === undefined &&
+    cacheWrite === undefined &&
+    totalTokens === undefined &&
+    cost === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    ...(input !== undefined ? { input } : {}),
+    ...(output !== undefined ? { output } : {}),
+    ...(cacheRead !== undefined ? { cacheRead } : {}),
+    ...(cacheWrite !== undefined ? { cacheWrite } : {}),
+    ...(totalTokens !== undefined ? { totalTokens } : {}),
+    ...(cost !== undefined ? { cost } : {}),
+  };
 }
 
 function messageCreatedAt(message: Record<string, unknown>, fallback: string): string {
@@ -285,17 +436,20 @@ function appendToolCalls(
   toolIndexByCallId: Map<string, number>,
   message: Record<string, unknown>,
   createdAt: string,
+  turnUsage?: SessionMessageUsage,
 ): void {
   const { content } = message;
   if (!Array.isArray(content)) {
     return;
   }
 
+  let attachedUsage = false;
   for (const part of content) {
     if (!isRecord(part) || part.type !== "toolCall" || typeof part.id !== "string") {
       continue;
     }
     toolIndexByCallId.set(part.id, transcript.length);
+    const usageToAttach = turnUsage && !attachedUsage ? turnUsage : undefined;
     transcript.push({
       kind: "tool",
       id: part.id,
@@ -303,8 +457,12 @@ function appendToolCalls(
       toolName: typeof part.name === "string" ? part.name : "tool",
       status: "error",
       ...(part.arguments !== undefined ? { input: part.arguments } : {}),
+      ...(usageToAttach ? { usage: usageToAttach } : {}),
       createdAt,
     });
+    if (usageToAttach) {
+      attachedUsage = true;
+    }
   }
 }
 
@@ -353,14 +511,14 @@ export function messageText(message: Record<string, unknown>): string {
 
   const { content } = message;
   if (typeof content === "string") {
-    return stripSerializedFileAttachments(content, message.role).text.trim();
+    return stripSerializedAttachments(content, message.role).text.trim();
   }
 
   if (Array.isArray(content)) {
     return content
       .map((part) =>
         isRecord(part) && part.type === "text" && typeof part.text === "string"
-          ? stripSerializedFileAttachments(part.text, message.role).text
+          ? stripSerializedAttachments(part.text, message.role).text
           : "",
       )
       .filter((text) => text.length > 0)
@@ -371,10 +529,24 @@ export function messageText(message: Record<string, unknown>): string {
   return "";
 }
 
+export function messageThinking(message: Record<string, unknown>): string | undefined {
+  const { content } = message;
+  if (!Array.isArray(content)) {
+    return undefined;
+  }
+  const parts = content
+    .filter((part): part is { type: "thinking"; thinking: string } =>
+      isRecord(part) && part.type === "thinking" && typeof part.thinking === "string"
+    )
+    .map((part) => part.thinking.trim())
+    .filter((text) => text.length > 0);
+  return parts.length > 0 ? parts.join("\n\n") : undefined;
+}
+
 function messageAttachments(message: Record<string, unknown>) {
   const { content } = message;
   if (typeof content === "string") {
-    return stripSerializedFileAttachments(content, message.role).attachments;
+    return stripSerializedAttachments(content, message.role).attachments;
   }
 
   if (!Array.isArray(content)) {
@@ -383,7 +555,7 @@ function messageAttachments(message: Record<string, unknown>) {
 
   return content.flatMap((part) => {
     if (isRecord(part) && part.type === "text" && typeof part.text === "string") {
-      return stripSerializedFileAttachments(part.text, message.role).attachments;
+      return stripSerializedAttachments(part.text, message.role).attachments;
     }
 
     if (!isRecord(part) || part.type !== "image" || typeof part.data !== "string" || typeof part.mimeType !== "string") {
@@ -401,39 +573,44 @@ function messageAttachments(message: Record<string, unknown>) {
   });
 }
 
-function stripSerializedFileAttachments(
+function stripSerializedAttachments(
   text: string,
   role: unknown,
 ): { readonly text: string; readonly attachments: readonly SessionTranscriptAttachment[] } {
-  if (role !== "user" || !text.startsWith(FILE_ATTACHMENT_BLOCK_START)) {
+  if (role !== "user") {
     return {
       text,
       attachments: [],
     };
   }
 
-  const endIndex = text.indexOf(FILE_ATTACHMENT_BLOCK_END, FILE_ATTACHMENT_BLOCK_START.length);
-  if (endIndex < 0) {
-    return {
-      text,
-      attachments: [],
-    };
+  let remainder = text;
+  const attachments: SessionTranscriptAttachment[] = [];
+  while (true) {
+    if (remainder.startsWith(FILE_ATTACHMENT_BLOCK_START)) {
+      const endIndex = remainder.indexOf(FILE_ATTACHMENT_BLOCK_END, FILE_ATTACHMENT_BLOCK_START.length);
+      if (endIndex < 0) break;
+      const payload = remainder.slice(FILE_ATTACHMENT_BLOCK_START.length, endIndex);
+      const parsed = parseSerializedFileAttachments(payload);
+      if (parsed.length === 0) break;
+      attachments.push(...parsed);
+      remainder = remainder.slice(endIndex + FILE_ATTACHMENT_BLOCK_END.length).replace(/^\n+/, "");
+      continue;
+    }
+    if (remainder.startsWith(BROWSER_ATTACHMENT_BLOCK_START)) {
+      const endIndex = remainder.indexOf(BROWSER_ATTACHMENT_BLOCK_END, BROWSER_ATTACHMENT_BLOCK_START.length);
+      if (endIndex < 0) break;
+      const payload = remainder.slice(BROWSER_ATTACHMENT_BLOCK_START.length, endIndex);
+      const parsed = parseSerializedBrowserAttachments(payload);
+      if (parsed.length === 0) break;
+      attachments.push(...parsed);
+      remainder = remainder.slice(endIndex + BROWSER_ATTACHMENT_BLOCK_END.length).replace(/^\n+/, "");
+      continue;
+    }
+    break;
   }
 
-  const payload = text.slice(FILE_ATTACHMENT_BLOCK_START.length, endIndex);
-  const remainder = text.slice(endIndex + FILE_ATTACHMENT_BLOCK_END.length).replace(/^\n+/, "");
-  const attachments = parseSerializedFileAttachments(payload);
-  if (attachments.length === 0) {
-    return {
-      text,
-      attachments: [],
-    };
-  }
-
-  return {
-    text: remainder,
-    attachments,
-  };
+  return attachments.length > 0 ? { text: remainder, attachments } : { text, attachments: [] };
 }
 
 function parseSerializedFileAttachments(payload: string): SessionTranscriptAttachment[] {
@@ -461,6 +638,42 @@ function parseSerializedFileAttachments(payload: string): SessionTranscriptAttac
   } catch {
     return [];
   }
+}
+
+function parseSerializedBrowserAttachments(payload: string): SessionTranscriptAttachment[] {
+  try {
+    const parsed = JSON.parse(payload) as { readonly version?: unknown; readonly elements?: readonly unknown[] };
+    if (parsed.version !== 1 || !Array.isArray(parsed.elements)) return [];
+    return parsed.elements.flatMap((entry) => isSerializedBrowserAttachment(entry) ? [entry] : []);
+  } catch {
+    return [];
+  }
+}
+
+function isSerializedBrowserAttachment(value: unknown): value is Extract<SessionTranscriptAttachment, { kind: "browser-element" }> {
+  if (!isRecord(value) || value.kind !== "browser-element") return false;
+  if (
+    typeof value.id !== "string" ||
+    typeof value.name !== "string" ||
+    typeof value.tabId !== "string" ||
+    typeof value.capturedAt !== "string" ||
+    typeof value.frameUrl !== "string" ||
+    !isRecord(value.page) ||
+    typeof value.page.url !== "string" ||
+    typeof value.page.title !== "string" ||
+    typeof value.page.revision !== "number" ||
+    !isRecord(value.element) ||
+    typeof value.element.tag !== "string" ||
+    !isRecord(value.element.attributes) ||
+    !isRecord(value.element.locator) ||
+    typeof value.element.locator.kind !== "string" ||
+    typeof value.element.locator.value !== "string" ||
+    typeof value.element.locator.unique !== "boolean" ||
+    !Array.isArray(value.element.ancestors)
+  ) {
+    return false;
+  }
+  return true;
 }
 
 /**

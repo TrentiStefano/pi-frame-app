@@ -3,7 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
-import type { SessionDriverEvent, SessionRef } from "@pi-gui/session-driver";
+import type { SessionDriverEvent, SessionRef } from "@pi-frame/session-driver";
 import { reviewedFilesKey } from "../../src/reviewed-files-store";
 import {
   commitAllInGitRepo,
@@ -180,7 +180,8 @@ test("Files mode shows a file browser and reader instead of the changes reviewer
     await diffPanel.locator('.diff-panel__file[data-file-path="src/foo.ts"] .diff-panel__file-name').click();
     await expect(diffPanel.locator(".diff-inline")).toBeVisible();
 
-    await window.locator(".topbar__actions").getByLabel("Toggle files").click();
+    await window.getByTestId("workspace-tools").click();
+    await window.getByRole("menuitem", { name: "Toggle files" }).click();
     await expect(diffPanel.locator(".diff-panel__title")).toHaveText("Files");
     await expect(diffPanel.getByTestId("diff-panel-counter")).toHaveCount(0);
     await expect(diffPanel.locator(".file-workbench__section--changes")).toHaveCount(0);
@@ -188,7 +189,7 @@ test("Files mode shows a file browser and reader instead of the changes reviewer
     await expect(diffPanel.locator(".file-workbench__context-strip")).toHaveCount(0);
 
     await diffPanel.locator('.file-workbench__tree-row--file[data-file-path="notes.md"]').click();
-    await expect(diffPanel.getByTestId("file-workbench-preview")).toContainText("# notes");
+    await expect(diffPanel.getByTestId("file-workbench-preview")).toContainText("notes");
     await expect(diffPanel.locator(".diff-inline")).toHaveCount(0);
     await expect(diffPanel.getByRole("group", { name: "Viewer mode" })).toHaveCount(0);
   } finally {

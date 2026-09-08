@@ -1,8 +1,9 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test, chromium, type Browser, type Page } from "@playwright/test";
+import { spawnProcess } from "../../scripts/launcher.mjs";
 import { makeUserDataDir } from "../helpers/electron-app";
 
 const desktopDir = path.resolve(__dirname, "..", "..");
@@ -54,7 +55,7 @@ const probes = {
   },
 } as const;
 
-test.setTimeout(240_000);
+test.setTimeout(300_000);
 
 type ProbeName = keyof typeof probes;
 type ProbeRecord = (typeof probes)[ProbeName];
@@ -98,28 +99,24 @@ class DevDesktopHarness {
       await this.browser.close().catch(() => {});
     }
     this.browser = null;
-    if (this.process.pid && this.process.exitCode == null) {
-      try {
-        process.kill(-this.process.pid, "SIGTERM");
-      } catch {
-        return;
-      }
+    if (this.process.pid && !this.hasExited()) {
+      await terminateProcessTree(this.process.pid, "SIGTERM");
     }
-    if (this.process.exitCode != null) {
+    if (this.hasExited()) {
       return;
     }
     const exited = new Promise<void>((resolve) => {
       this.process.once("exit", () => resolve());
     });
     await Promise.race([exited, delay(5_000)]);
-    if (this.process.exitCode == null && this.process.pid) {
-      try {
-        process.kill(-this.process.pid, "SIGKILL");
-      } catch {
-        return;
-      }
+    if (!this.hasExited() && this.process.pid) {
+      await terminateProcessTree(this.process.pid, "SIGKILL");
       await exited;
     }
+  }
+
+  private hasExited(): boolean {
+    return this.process.exitCode != null || this.process.signalCode != null;
   }
 
   private async getPage(timeoutMs: number, forceReconnect = false): Promise<Page> {
@@ -172,9 +169,24 @@ class DevDesktopHarness {
     throw new Error(`Timed out waiting for an Electron renderer page.\n${this.recentLogs()}`);
   }
 
-  private recentLogs(): string {
+  recentLogs(): string {
     return this.logs.join("").slice(-6_000);
   }
+}
+
+function terminateProcessTree(pid: number, signal: NodeJS.Signals): Promise<void> {
+  if (process.platform === "win32") {
+    return new Promise((resolve) => {
+      execFile("taskkill", ["/PID", String(pid), "/T", "/F"], () => resolve());
+    });
+  }
+
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // The process may have exited between the exitCode check and the signal.
+  }
+  return Promise.resolve();
 }
 
 function buildProbeSource(probe: ProbeRecord, value: string): string {
@@ -182,8 +194,8 @@ function buildProbeSource(probe: ProbeRecord, value: string): string {
 }
 
 async function startDesktopDev(): Promise<DevDesktopHarness> {
-  const userDataDir = await makeUserDataDir("pi-gui-dev-reload-");
-  const child = spawn("pnpm", ["dev", "--", "--remoteDebuggingPort", String(cdpPort)], {
+  const userDataDir = await makeUserDataDir("pi-frame-dev-reload-");
+  const child = spawnProcess("pnpm", ["dev", "--", "--remoteDebuggingPort", String(cdpPort)], {
     cwd: desktopDir,
     env: {
       ...process.env,
@@ -202,7 +214,8 @@ async function startDesktopDev(): Promise<DevDesktopHarness> {
   child.stdout.on("data", (chunk) => harness.appendLog(chunk.toString()));
   child.stderr.on("data", (chunk) => harness.appendLog(chunk.toString()));
   try {
-    await waitForMarker(harness, probes.renderer.markerName, probes.renderer.before, 45_000);
+    const startupTimeout = process.platform === "win32" ? 120_000 : 45_000;
+    await waitForMarker(harness, probes.renderer.markerName, probes.renderer.before, startupTimeout);
     return harness;
   } catch (error) {
     await harness.dispose();
@@ -229,7 +242,9 @@ async function waitForMarker(
     await delay(500);
   }
 
-  throw new Error(`Timed out waiting for marker ${name}=${expected}: ${String(lastError ?? "no marker value")}`);
+  throw new Error(
+    `Timed out waiting for marker ${name}=${expected}: ${String(lastError ?? "no marker value")}\n${harness.recentLogs()}`,
+  );
 }
 
 async function replaceProbeText(name: ProbeName, nextValue: string): Promise<() => Promise<void>> {

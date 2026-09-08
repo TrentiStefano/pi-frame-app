@@ -1,6 +1,6 @@
-import { sessionKey } from "@pi-gui/pi-sdk-driver";
-import type { SessionTranscriptItem } from "@pi-gui/pi-sdk-driver";
-import type { SessionDriverEvent, SessionQueuedMessage, SessionRef } from "@pi-gui/session-driver";
+import { sessionKey } from "@pi-frame/pi-sdk-driver";
+import type { SessionTranscriptItem } from "@pi-frame/pi-sdk-driver";
+import type { SessionDriverEvent, SessionQueuedMessage, SessionRef } from "@pi-frame/session-driver";
 import type { TranscriptMessage } from "../src/desktop-state";
 import {
   formatElapsedDuration,
@@ -43,6 +43,7 @@ export function timelineFromDriverTranscript(items: readonly SessionTranscriptIt
         ...(item.input !== undefined ? { input: item.input } : {}),
         ...(item.output !== undefined ? { output: item.output } : {}),
       }),
+      ...(item.usage !== undefined ? { usage: item.usage } : {}),
       createdAt: item.createdAt,
     };
   });
@@ -97,31 +98,37 @@ export function appendAssistantDelta(
   activeAssistantMessageBySession: Map<string, string>,
   sessionRef: SessionRef,
   text: string,
-): void {
+): { readonly messageId: string; readonly createdAt: string } {
   const key = sessionKey(sessionRef);
   const transcript = [...(transcriptCache.get(key) ?? [])];
   const activeId = activeAssistantMessageBySession.get(key);
 
   if (activeId) {
-    const index = transcript.findIndex((message) => message.id === activeId);
+    const lastIndex = transcript.length - 1;
+    const index = transcript[lastIndex]?.id === activeId
+      ? lastIndex
+      : transcript.findIndex((message) => message.id === activeId);
     const current = index >= 0 ? transcript[index] : undefined;
     if (current?.kind === "message") {
       transcript[index] = {
         ...current,
         text: `${current.text}${text}`,
       };
-    } else {
-      const message = makeTranscriptMessage("assistant", text);
-      transcript.push(message);
-      activeAssistantMessageBySession.set(key, message.id);
+      transcriptCache.set(key, transcript);
+      return { messageId: current.id, createdAt: current.createdAt };
     }
-  } else {
     const message = makeTranscriptMessage("assistant", text);
     transcript.push(message);
     activeAssistantMessageBySession.set(key, message.id);
+    transcriptCache.set(key, transcript);
+    return { messageId: message.id, createdAt: message.createdAt };
   }
 
+  const message = makeTranscriptMessage("assistant", text);
+  transcript.push(message);
+  activeAssistantMessageBySession.set(key, message.id);
   transcriptCache.set(key, transcript);
+  return { messageId: message.id, createdAt: message.createdAt };
 }
 
 export function clearActiveAssistantMessage(
@@ -150,13 +157,19 @@ export function applyTimelineEvent(
       break;
     case "sessionUpdated":
       if (event.snapshot.status === "running" && event.snapshot.runningRunId && !state.runningSinceBySession.has(key)) {
+        const lastItem = transcript.at(-1);
+        if (lastItem?.kind === "message" && lastItem.role === "assistant") {
+          state.activeAssistantMessageBySession.set(key, lastItem.id);
+        } else {
+          state.activeAssistantMessageBySession.delete(key);
+        }
         state.runningSinceBySession.set(key, event.timestamp);
         state.runMetricsBySession.set(key, {
           startedAt: event.timestamp,
           toolCount: 0,
           searchCount: 0,
           fileCount: 0,
-        });        
+        });
         const activity = makeActivityItem("Working…");
         state.activeWorkingActivityBySession.set(key, activity.id);
         transcript.push(activity);

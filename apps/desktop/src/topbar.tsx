@@ -1,10 +1,14 @@
-import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import type { AppView, SessionRecord, WorkspaceRecord, WorktreeRecord } from "./desktop-state";
-import { DiffIcon, FileIcon, PromptRailIcon, TerminalIcon } from "./icons";
+import { BrowserPreviewIcon, ChevronDownIcon, DiffIcon, FileIcon, FolderIcon, TerminalIcon, WorktreeIcon } from "./icons";
+import { Check, Ellipsis, ListChecks } from "lucide-react";
 import { getDesktopShortcutLabel, type PiDesktopApi } from "./ipc";
 import type { WorkspaceMenuState } from "./hooks/use-workspace-menu";
+import { useTranslation } from "react-i18next";
+import { formatShortcut, type ShortcutBindings } from "./keyboard-shortcuts";
 
 interface TopbarProps {
+  readonly sidebarToggle: ReactNode;
   readonly activeView: AppView;
   readonly rootWorkspace: WorkspaceRecord | undefined;
   readonly selectedWorkspace: WorkspaceRecord | undefined;
@@ -15,6 +19,7 @@ interface TopbarProps {
   readonly workspaces: readonly WorkspaceRecord[];
   readonly wsMenu: WorkspaceMenuState;
   readonly api: PiDesktopApi;
+  readonly shortcutBindings: ShortcutBindings;
   readonly terminalAvailable: boolean;
   readonly terminalVisible: boolean;
   readonly onToggleTerminal: () => void;
@@ -23,12 +28,17 @@ interface TopbarProps {
   readonly onToggleChanges: () => void;
   readonly filesVisible: boolean;
   readonly onToggleFiles: () => void;
-  readonly promptRailVisible: boolean;
-  readonly onTogglePromptRail: () => void;
+  readonly planAvailable: boolean;
+  readonly planVisible: boolean;
+  readonly onTogglePlan: () => void;
+  readonly browserVisible: boolean;
+  readonly onToggleBrowser: () => void;
 }
 
 export function Topbar(props: TopbarProps) {
+  const { t } = useTranslation();
   const {
+    sidebarToggle,
     activeView,
     rootWorkspace,
     selectedWorkspace,
@@ -39,6 +49,7 @@ export function Topbar(props: TopbarProps) {
     workspaces,
     wsMenu,
     api,
+    shortcutBindings,
     terminalAvailable,
     terminalVisible,
     onToggleTerminal,
@@ -47,10 +58,14 @@ export function Topbar(props: TopbarProps) {
     onToggleChanges,
     filesVisible,
     onToggleFiles,
-    promptRailVisible,
-    onTogglePromptRail,
+    planAvailable,
+    planVisible,
+    onTogglePlan,
+    browserVisible,
+    onToggleBrowser,
   } = props;
-  const terminalShortcut = getDesktopShortcutLabel(api.platform, "J");
+  const terminalShortcut = formatShortcut(shortcutBindings.toggleTerminal, api.platform);
+  const browserShortcut = formatShortcut(shortcutBindings.toggleBrowser, api.platform);
   const diffShortcut = getDesktopShortcutLabel(api.platform, "D");
 
   const handleDoubleClick = (event: ReactMouseEvent<HTMLElement>) => {
@@ -70,7 +85,7 @@ export function Topbar(props: TopbarProps) {
     <header className="topbar" data-testid="topbar" onDoubleClick={handleDoubleClick}>
       <div className="topbar__title">
         <span className="topbar__workspace">
-          {rootWorkspace ? rootWorkspace.name : "Open a folder to begin"}
+          {rootWorkspace ? rootWorkspace.name : t("settings.openFolderToBegin")}
         </span>
         {selectedWorkspace && activeView === "threads" ? (
           <>
@@ -79,20 +94,32 @@ export function Topbar(props: TopbarProps) {
               <button
                 aria-expanded={wsMenu.environmentMenuOpen}
                 aria-haspopup="menu"
-                className="environment-picker__button"
+                className="environment-picker__button composer-select__trigger"
                 type="button"
                 onClick={() => wsMenu.setEnvironmentMenuOpen((current) => !current)}
               >
-                {selectedWorkspace.kind === "worktree" ? selectedWorktree?.name ?? selectedWorkspace.name : "Local"}
+                <span className="composer-select__icon" aria-hidden="true">
+                  {selectedWorkspace.kind === "worktree" ? <WorktreeIcon /> : <FolderIcon />}
+                </span>
+                <span className="composer-select__label">
+                  {selectedWorkspace.kind === "worktree" ? selectedWorktree?.name ?? selectedWorkspace.name : t("common.local")}
+                </span>
+                <span className="composer-select__chevron" aria-hidden="true"><ChevronDownIcon /></span>
               </button>
               {wsMenu.environmentMenuOpen && rootWorkspace ? (
-                <div className="workspace-menu environment-picker__menu">
+                <div className="workspace-menu environment-picker__menu" role="menu">
                   <button
-                    className="workspace-menu__item"
+                    aria-checked={selectedWorkspace.id === rootWorkspace.id}
+                    className="workspace-menu__item environment-picker__item"
+                    role="menuitemradio"
                     type="button"
                     onClick={() => wsMenu.selectWorkspace(rootWorkspace.id)}
                   >
-                    Local
+                    <span className="composer-select__option-icon" aria-hidden="true"><FolderIcon /></span>
+                    <span>{t("common.local")}</span>
+                    <span className="composer-select__check" aria-hidden="true">
+                      {selectedWorkspace.id === rootWorkspace.id ? <Check /> : null}
+                    </span>
                   </button>
                   {activeWorktrees.map((worktree) => {
                     const linkedWorkspace = workspaces.find(
@@ -101,8 +128,10 @@ export function Topbar(props: TopbarProps) {
                     const worktreeSelectable = Boolean(linkedWorkspace) && worktree.status === "ready";
                     return (
                       <button
-                        className="workspace-menu__item"
+                        aria-checked={linkedWorkspace?.id === selectedWorkspace.id}
+                        className="workspace-menu__item environment-picker__item"
                         key={worktree.id}
+                        role="menuitemradio"
                         type="button"
                         disabled={!worktreeSelectable}
                         onClick={() => {
@@ -111,8 +140,14 @@ export function Topbar(props: TopbarProps) {
                           }
                         }}
                       >
-                        {worktree.name}
-                        {!worktreeSelectable ? ` (${worktree.status !== "ready" ? worktree.status : "unavailable"})` : ""}
+                        <span className="composer-select__option-icon" aria-hidden="true"><WorktreeIcon /></span>
+                        <span>
+                          {worktree.name}
+                          {!worktreeSelectable ? ` (${worktree.status !== "ready" ? worktree.status : "unavailable"})` : ""}
+                        </span>
+                        <span className="composer-select__check" aria-hidden="true">
+                          {linkedWorkspace?.id === selectedWorkspace.id ? <Check /> : null}
+                        </span>
                       </button>
                     );
                   })}
@@ -129,43 +164,156 @@ export function Topbar(props: TopbarProps) {
         ) : activeView === "new-thread" && rootWorkspace ? (
           <>
             <span className="topbar__separator">/</span>
-            <span className="topbar__session">New thread</span>
+            <span className="topbar__session">{t("common.newThread")}</span>
           </>
         ) : null}
       </div>
 
       <div className="topbar__actions">
-        <TopbarActionButton
-          active={terminalVisible}
-          disabled={!terminalAvailable}
-          icon={<TerminalIcon />}
-          label="Toggle terminal"
-          shortcut={terminalShortcut}
-          onClick={onToggleTerminal}
+        <WorkspaceToolsMenu
+          terminalAvailable={terminalAvailable}
+          terminalVisible={terminalVisible}
+          onToggleTerminal={onToggleTerminal}
+          panelAvailable={panelAvailable}
+          changesVisible={changesVisible}
+          onToggleChanges={onToggleChanges}
+          filesVisible={filesVisible}
+          onToggleFiles={onToggleFiles}
+          planAvailable={planAvailable}
+          planVisible={planVisible}
+          onTogglePlan={onTogglePlan}
+          browserVisible={browserVisible}
+          onToggleBrowser={onToggleBrowser}
+          terminalShortcut={terminalShortcut}
+          diffShortcut={diffShortcut}
+          browserShortcut={browserShortcut}
         />
-        <TopbarActionButton
-          active={changesVisible}
-          disabled={!panelAvailable}
-          icon={<DiffIcon />}
-          label="Toggle changes"
-          shortcut={diffShortcut}
-          onClick={onToggleChanges}
-        />
-        <TopbarActionButton
-          active={filesVisible}
-          disabled={!panelAvailable}
-          icon={<FileIcon />}
-          label="Toggle files"
-          onClick={onToggleFiles}
-        />
-        <TopbarActionButton
-          active={promptRailVisible}
-          icon={<PromptRailIcon />}
-          label={promptRailVisible ? "Hide prompt navigation" : "Show prompt navigation"}
-          onClick={onTogglePromptRail}
-        />
+        {sidebarToggle}
       </div>
     </header>
+  );
+}
+
+function WorkspaceToolsMenu({
+  terminalAvailable,
+  terminalVisible,
+  onToggleTerminal,
+  panelAvailable,
+  changesVisible,
+  onToggleChanges,
+  filesVisible,
+  onToggleFiles,
+  planAvailable,
+  planVisible,
+  onTogglePlan,
+  browserVisible,
+  onToggleBrowser,
+  terminalShortcut,
+  diffShortcut,
+  browserShortcut,
+}: {
+  readonly terminalAvailable: boolean;
+  readonly terminalVisible: boolean;
+  readonly onToggleTerminal: () => void;
+  readonly panelAvailable: boolean;
+  readonly changesVisible: boolean;
+  readonly onToggleChanges: () => void;
+  readonly filesVisible: boolean;
+  readonly onToggleFiles: () => void;
+  readonly planAvailable: boolean;
+  readonly planVisible: boolean;
+  readonly onTogglePlan: () => void;
+  readonly browserVisible: boolean;
+  readonly onToggleBrowser: () => void;
+  readonly terminalShortcut: string;
+  readonly diffShortcut: string;
+  readonly browserShortcut: string;
+}) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: PointerEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, [open]);
+
+  return (
+    <div className="workspace-tools" ref={menuRef}>
+      <button
+        aria-expanded={open}
+        aria-haspopup="menu"
+        aria-label={t("shell.workspaceTools")}
+        className={`icon-button topbar__icon workspace-tools__button${open ? " icon-button--active" : ""}`}
+        data-testid="workspace-tools"
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+      >
+        <Ellipsis aria-hidden="true" />
+      </button>
+      {open ? (
+        <div className="workspace-tools__menu" role="menu">
+          <WorkspaceToolItem
+            icon={<TerminalIcon />}
+            label={t("settings.toggleTerminal")}
+            shortcut={terminalShortcut}
+            active={terminalVisible}
+            disabled={!terminalAvailable}
+            onClick={() => { onToggleTerminal(); setOpen(false); }}
+          />
+          <WorkspaceToolItem
+            icon={<DiffIcon />}
+            label={t("shell.toggleChanges")}
+            shortcut={diffShortcut}
+            active={changesVisible}
+            disabled={!panelAvailable}
+            onClick={() => { onToggleChanges(); setOpen(false); }}
+          />
+          <WorkspaceToolItem
+            icon={<FileIcon />}
+            label={t("shell.toggleFiles")}
+            active={filesVisible}
+            disabled={!panelAvailable}
+            onClick={() => { onToggleFiles(); setOpen(false); }}
+          />
+          <WorkspaceToolItem
+            icon={<ListChecks />}
+            label={t("shell.togglePlan")}
+            active={planVisible}
+            disabled={!planAvailable}
+            onClick={() => { onTogglePlan(); setOpen(false); }}
+          />
+          <WorkspaceToolItem
+            icon={<BrowserPreviewIcon />}
+            label={t("shell.browser")}
+            shortcut={browserShortcut}
+            active={browserVisible}
+            disabled={!panelAvailable}
+            onClick={() => { onToggleBrowser(); setOpen(false); }}
+          />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function WorkspaceToolItem({ icon, label, shortcut, active, disabled, onClick }: TopbarActionButtonProps) {
+  return (
+    <button
+      className={`workspace-tools__item${active ? " workspace-tools__item--active" : ""}`}
+      disabled={disabled}
+      role="menuitem"
+      type="button"
+      onClick={onClick}
+    >
+      <span className="workspace-tools__item-icon">{icon}</span>
+      <span>{label}</span>
+      {shortcut ? <kbd>{shortcut}</kbd> : null}
+    </button>
   );
 }
 
@@ -176,31 +324,4 @@ interface TopbarActionButtonProps {
   readonly disabled?: boolean;
   readonly shortcut?: string;
   readonly onClick: () => void;
-}
-
-function TopbarActionButton({
-  label,
-  icon,
-  active = false,
-  disabled = false,
-  shortcut,
-  onClick,
-}: TopbarActionButtonProps) {
-  return (
-    <div className="shortcut-tooltip-wrap topbar__tooltip-wrap">
-      <button
-        aria-label={label}
-        className={`icon-button topbar__icon ${active ? "icon-button--active" : ""}`}
-        type="button"
-        disabled={disabled}
-        onClick={onClick}
-      >
-        {icon}
-      </button>
-      <span className="shortcut-tooltip topbar__tooltip" role="tooltip">
-        <span>{label}</span>
-        {shortcut ? <kbd>{shortcut}</kbd> : null}
-      </span>
-    </div>
-  );
 }

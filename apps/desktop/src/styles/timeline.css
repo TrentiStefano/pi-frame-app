@@ -7,6 +7,10 @@
  * entrance/streaming motion. Only tokens from tokens.css / base.css are used.
  * ========================================================================== */
 
+.timeline-elastic-wrapper {
+  width: 100%;
+}
+
 .timeline {
   display: grid;
   gap: 16px;
@@ -16,6 +20,7 @@
    * too-wide canvas. Column is centered; rows keep their own inner caps. */
   max-width: var(--transcript-measure, 768px);
   margin-inline: auto;
+  padding-bottom: 0px;
 }
 
 .timeline--virtualized {
@@ -28,6 +33,8 @@
   position: absolute;
   top: 0;
   width: 100%;
+  /* Keep a markdown-heavy row's layout and paint work local to the row. */
+  contain: layout paint;
 }
 
 .timeline-pane {
@@ -38,6 +45,10 @@
   max-height: calc(100vh - 320px);
   overflow: auto;
   overflow-anchor: none;
+  /* Windows classic scrollbars otherwise change the measure width when they
+   * appear, causing markdown lines to reflow during transcript updates. */
+  scrollbar-gutter: stable;
+  overscroll-behavior-y: auto;
   /* Programmatic timeline scrolls (opening a thread, jump-to-latest,
    * transcript-update alignment) drive scrollTop directly. Leaving
    * `scroll-behavior: smooth` here turned every assignment into a
@@ -47,104 +58,13 @@
   scroll-behavior: auto;
 }
 
-/* Row wrapper holding the scrolling transcript and the right context rail. It
- * takes over the vertical flex growth the pane used to own, so the pane keeps
- * its own bounded height + internal scroll while the rail sits beside it. */
-.timeline-surface {
-  display: flex;
-  flex: 1 1 auto;
-  min-height: 0;
-  min-width: 0;
-  gap: 12px;
-  /* Track the reading area's own width so the rail can drop out before it would
-   * squeeze the transcript below its 768px measure, independent of viewport or
-   * sidebar width. */
-  container-type: inline-size;
-  container-name: timeline-surface;
-}
-
 .timeline-pane--thread {
   flex: 1 1 auto;
   min-height: 0;
   min-width: 0;
+  max-width: 100%;
   max-height: none;
-}
-
-.timeline-context-rail {
-  flex: 0 0 auto;
-  width: 132px;
-  align-self: stretch;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 4px 0 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  border-left: 1px solid var(--line);
-  padding-left: 16px;
-}
-
-.timeline-context-rail__title {
-  color: var(--muted-soft);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  padding: 4px 0;
-}
-
-.timeline-context-rail__list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.timeline-context-rail__item {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  width: 100%;
-  padding: 5px 8px;
-  border: none;
-  border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--muted-strong);
-  font: inherit;
-  font-size: 12px;
-  line-height: 1.4;
-  text-align: left;
-  cursor: pointer;
-}
-
-.timeline-context-rail__item:hover {
-  background: var(--surface-muted);
-  color: var(--ink);
-}
-
-.timeline-context-rail__index {
-  flex-shrink: 0;
-  color: var(--muted-soft);
-  font-variant-numeric: tabular-nums;
-  font-size: 11px;
-}
-
-.timeline-context-rail__text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* The rail lives in the outer margin beside the reading column. It only earns
- * its space once the surface can hold the 768px measure, a classic 15px macOS
- * scrollbar, the 12px gap, and the 132px rail (927px total). */
-@container timeline-surface (max-width: 926px) {
-  .timeline-context-rail {
-    display: none;
-  }
+  overflow-x: hidden;
 }
 
 .timeline-empty {
@@ -274,7 +194,8 @@
 }
 
 .timeline-item__bubble {
-  width: min(620px, 100%);
+  width: fit-content;
+  max-width: min(620px, 100%);
   min-width: 0;
   padding: 13px 17px;
   border-radius: var(--radius-3xl);
@@ -301,7 +222,8 @@
   border-radius: var(--radius-xl);
 }
 
-.timeline-item__attachment--file {
+.timeline-item__attachment--file,
+.timeline-item__attachment--browser-element {
   min-width: 0;
   max-width: min(320px, 100%);
   display: inline-flex;
@@ -311,6 +233,27 @@
   border-radius: var(--radius-xl);
   background: var(--main);
 }
+
+@keyframes message-block-enter {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+button.timeline-item__attachment--browser-element {
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 140ms cubic-bezier(.25, 1, .5, 1), background 140ms cubic-bezier(.25, 1, .5, 1);
+}
+
+button.timeline-item__attachment--browser-element:hover { border-color: var(--muted-soft); background: var(--overlay-hover); }
+button.timeline-item__attachment--browser-element:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .timeline-item__attachment-icon {
   width: 18px;
@@ -365,6 +308,88 @@
 }
 
 /* ---- Tool calls --------------------------------------------------------- */
+
+.timeline-tool-group {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.timeline-tool-group__header {
+  align-items: center;
+  background: none;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  padding: 0;
+  text-align: left;
+  width: 100%;
+}
+
+.timeline-tool-group__header:hover .timeline-tool-group__label {
+  color: var(--ink);
+}
+
+.timeline-tool-group__header:focus-visible {
+  border-radius: var(--radius-sm);
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.timeline-tool-group__glyph {
+  color: var(--muted-soft);
+  display: inline-flex;
+  flex: 0 0 16px;
+  height: 16px;
+}
+
+.timeline-tool-group__glyph svg {
+  height: 14px;
+  width: 14px;
+}
+
+.timeline-tool-group__label {
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.timeline-tool-group__meta {
+  align-items: center;
+  color: var(--muted-soft);
+  display: inline-flex;
+  font-size: 12px;
+  gap: 5px;
+  margin-left: 4px;
+  white-space: nowrap;
+}
+
+.timeline-tool-group--error .timeline-tool-group__glyph,
+.timeline-tool-group--error .timeline-tool-group__label {
+  color: var(--error-ink);
+}
+
+.timeline-tool-group--success .timeline-tool__status-pip {
+  background: var(--success);
+}
+
+.timeline-tool-group--error .timeline-tool__status-pip {
+  background: var(--error);
+}
+
+.timeline-tool-group--running .timeline-tool__status-pip {
+  animation: timeline-pip-pulse 1.4s var(--ease-in-out) infinite;
+  background: var(--accent);
+}
+
+.timeline-tool-group__body {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 2px 22px;
+  min-width: 0;
+}
 
 .timeline-tool {
   max-width: 100%;
@@ -526,6 +551,9 @@
   overflow: hidden;
   max-height: 400px;
   overflow-y: auto;
+  contain: layout paint;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .timeline-tool__diff-header {
@@ -786,9 +814,67 @@
 .message__content ul,
 .message__content ol,
 .message__content pre,
-.message__content blockquote {
+.message__content blockquote,
+.message__content table {
   margin: 0;
   min-width: 0;
+}
+
+.message__content--streaming {
+  display: block;
+  white-space: pre-wrap;
+}
+
+/* Only newly appended settled markdown blocks animate, so final updates remain
+ * cheap and readable. */
+.timeline-item--assistant .message__content > * {
+  animation: message-block-enter var(--motion-base) cubic-bezier(0.25, 1, 0.5, 1) both;
+}
+
+.message__content h1,
+.message__content h2,
+.message__content h3,
+.message__content h4 {
+  margin: 8px 0 0;
+  color: var(--text-strong);
+  line-height: 1.3;
+}
+
+.message__content h1 { font-size: 20px; }
+.message__content h2 { font-size: 17px; }
+.message__content h3 { font-size: 15px; }
+.message__content h4 { font-size: 14px; }
+
+.message__content hr {
+  width: 100%;
+  margin: 6px 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+.message__content table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.message__content th,
+.message__content td {
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+
+.message__content th {
+  background: var(--surface-muted);
+  font-weight: 650;
+}
+
+.message__content input[type="checkbox"] {
+  margin: 0 6px 0 0;
+  vertical-align: -1px;
 }
 
 .message__content ul,
@@ -851,11 +937,140 @@
   text-decoration: underline;
 }
 
+/* ---- Thinking / Reasoning block ---------------------------------------- */
+
+.thinking-block {
+  margin: 6px 0 12px;
+  border-radius: var(--radius-md, 8px);
+  border: 1px solid var(--theme-control-border, var(--border));
+  background: var(--surface-muted);
+  overflow: hidden;
+  transition: border-color var(--motion-fast) var(--ease-out);
+}
+
+.thinking-block:hover {
+  border-color: var(--line);
+}
+
+.thinking-block--expanded {
+  background: var(--surface-subtle, var(--surface));
+}
+
+.thinking-block__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  color: var(--muted-strong);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.thinking-block__header:hover {
+  background: var(--overlay-hover);
+  color: var(--text-strong);
+}
+
+.thinking-block__chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: var(--muted-soft);
+  transition: transform var(--motion-fast) var(--ease-out);
+  flex-shrink: 0;
+}
+
+.thinking-block__chevron svg {
+  width: 12px;
+  height: 12px;
+}
+
+.thinking-block__chevron--expanded {
+  transform: rotate(90deg);
+}
+
+.thinking-block__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: var(--accent, #7c3aed);
+  flex-shrink: 0;
+}
+
+.thinking-block__icon svg {
+  width: 13px;
+  height: 13px;
+}
+
+.thinking-block__title {
+  font-weight: 550;
+  font-size: 11.5px;
+  color: var(--muted-strong);
+}
+
+.thinking-block__state {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--muted-soft);
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--overlay-hover);
+}
+
+.thinking-block__pulsing-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: thinking-dot-pulse 1.5s infinite ease-in-out;
+}
+
+@keyframes thinking-dot-pulse {
+  0%, 100% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.1);
+  }
+}
+
+.thinking-block__body {
+  padding: 8px 12px 12px 14px;
+  border-top: 1px solid var(--theme-control-border, var(--border));
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--muted-strong);
+  max-height: 480px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.thinking-block__body .message__content {
+  font-size: inherit;
+  color: inherit;
+}
+
 /* ---- Reduced motion ----------------------------------------------------- */
 
 @media (prefers-reduced-motion: reduce) {
   .timeline:not(.timeline--virtualized) > *,
+  .timeline-item--assistant .message__content > *,
   .skeleton-line,
+  .thinking-block__pulsing-dot,
   .timeline-tool--running .timeline-tool__status-pip {
     animation: none;
   }

@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Verify code changes in this repo on the right real surface. Use when the user asks to verify, test, self-test, prove something works, or when implementation is complete and verification is still needed. For `apps/desktop`, choose the correct Electron Playwright lane (`core`, `live`, or `native`), use the shared desktop helpers, rerun the owning lane for `core` and `live`, and use the targeted native spec by default for `native`.
+description: Verify code changes in this repo on the right real surface. Use when the user asks to verify, test, self-test, prove something works, or when implementation is complete and verification is still needed. For `apps/desktop`, choose the correct Electron Playwright lane (`core`, `live`, or `native`), use the shared desktop helpers, and scale from targeted specs to full lanes according to change risk.
 ---
 
 # Verify
@@ -17,7 +17,7 @@ For this repo, verification starts by mapping changed files to the correct packa
 2. Inspect the changed files and map them to the affected package and user surface.
 3. Read the current package scripts instead of assuming command names from memory.
 4. Run the smallest convincing proof first while iterating.
-5. Re-run the strongest practical lane or package-level verification before closing.
+5. Expand verification only when the changed surface or observed failures justify it.
 6. Report what was verified, on which surface, and any blockers that prevented stronger proof.
 
 ## Repo Map
@@ -45,9 +45,16 @@ Choose the smallest lane that matches the changed surface:
 - `native`
   macOS OS-surface behavior such as pickers or real clipboard paste. Foreground-only and focus-sensitive.
 
-Use targeted specs while iterating.
-For `core` and `live`, rerun the owning lane before closing.
-For `native`, rerun the targeted native spec by default and expand to the full native lane only when the change touches shared native helpers, multiple native specs, or lane-wide native behavior.
+Use targeted specs while iterating and, for narrow changes, as the default closing proof. A targeted Electron spec is real-surface verification; it does not need a full-lane rerun merely because it belongs to `core` or `live`.
+
+Scale desktop verification by blast radius:
+
+- Narrow feature or regression fix: run the directly affected spec or tests, plus package typecheck or unit coverage when relevant.
+- Change shared by several related features: run the affected specs together and add `tests/core/smoke.spec.ts` when startup or basic thread creation could regress.
+- Lane-wide or high-risk change: run the full owning lane. This includes changes to `playwright.config.ts`, `tests/helpers/electron-app.ts`, Electron app bootstrap/preload, shared persistence or state schemas, cross-feature navigation, or multiple unrelated desktop surfaces.
+- Release candidate or CI gate: run the full lane required by the release/CI workflow.
+
+For `native`, keep the targeted native spec as the default and expand to the full native lane only when the change touches shared native helpers, multiple native specs, or lane-wide native behavior.
 
 Prefer shared helpers in `apps/desktop/tests/helpers/electron-app.ts`.
 Do not add IPC/state shortcuts for visible behavior unless the product surface does not exist yet.
@@ -68,7 +75,8 @@ Prefer package-local typecheck and test commands over repo-wide sweeps when the 
 ## Gotchas
 
 - Do not stop at `pnpm test` when the changed surface is `apps/desktop`; choose the correct Electron lane explicitly.
-- Do not trust a targeted desktop spec alone if the lane matters; rerun the owning lane before closing.
+- Do not turn the full `core` lane into a default closing ritual. It is a 200+ test serial regression gate; reserve it for broad changes, CI, and release confidence.
+- Do not claim broad lane confidence from a targeted spec. Report the exact covered scenario and why that scope matches the change.
 - Do not treat `native` failures as automatic product regressions. Foreground focus, picker timing, and macOS Accessibility can invalidate the run.
 - Do not force the full `native` lane for every native-adjacent change. Unrelated picker failures can hide whether the changed native surface actually works.
 - Do not add new desktop harnesses when `apps/desktop/tests/helpers/electron-app.ts` can be extended instead.

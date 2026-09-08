@@ -1,0 +1,100 @@
+import type { CustomTheme } from "./types";
+
+export const BUILTIN_THEMES: readonly CustomTheme[] = [
+  {
+    id: "light",
+    name: "Default Light",
+    kind: "light",
+    isBuiltin: true,
+    colors: {},
+    cssVariables: {
+      window: "#eceef3",
+      sidebar: "#f4f5f8",
+      main: "#f8f8fb",
+      surface: "#ffffff",
+      surfaceMuted: "#f1f3f7",
+      line: "#dde1ea",
+      lineStrong: "#d2d7e2",
+      text: "#39435b",
+      textStrong: "#1f2638",
+      muted: "#747d93",
+      accent: "#6a55f2",
+      error: "#c45666",
+      buttonPrimaryBg: "#1f2638",
+      buttonPrimaryInk: "#ffffff",
+      codeInlineBg: "#f2f4f8",
+      codeBlockBg: "#eef2f8",
+      codeInk: "#25304a",
+      codeBorder: "#dfe3eb",
+    },
+  },
+  {
+    id: "dark",
+    name: "Default Dark",
+    kind: "dark",
+    isBuiltin: true,
+    colors: {},
+    cssVariables: {
+      window: "#1a1b1e",
+      sidebar: "#202124",
+      main: "#1e1f22",
+      surface: "#2b2d31",
+      surfaceMuted: "#232428",
+      line: "#3a3c42",
+      lineStrong: "#4a4d55",
+      text: "#d4d4d8",
+      textStrong: "#f4f4f5",
+      muted: "#8b8d94",
+      accent: "#7c6bf5",
+      error: "#e05467",
+      buttonPrimaryBg: "#f4f4f5",
+      buttonPrimaryInk: "#1f2638",
+      codeInlineBg: "rgba(255, 255, 255, 0.08)",
+      codeBlockBg: "rgba(0, 0, 0, 0.25)",
+      codeInk: "#e4e4e7",
+      codeBorder: "#3a3c42",
+    },
+  },
+  {
+    id: "brown-beige-light",
+    name: "Brown & Beige Light",
+    kind: "light",
+    isBuiltin: true,
+    colors: {
+      saddleBrown: "#8B4411",
+      santaFe: "#AE6E4E",
+      fadedOrange: "#CC9767",
+      beige: "#F5F5DD",
+      lightFrenchBeige: "#C7AD7F",
+      cafeAuLait: "#A57A5A",
+    },
+    cssVariables: {
+      window: "#F5F5DD",
+      sidebar: "#EFECE0",
+      main: "#F7F4E9",
+      surface: "#FAF8F0",
+      surfaceMuted: "#EBE6D6",
+      line: "#C7AD7F",
+      lineStrong: "#AE6E4E",
+      text: "#5C3A21",
+      textStrong: "#8B4411",
+      muted: "#A57A5A",
+      accent: "#AE6E4E",
+      error: "#C45666",
+      buttonPrimaryBg: "#AE6E4E",
+      buttonPrimaryInk: "#F5F5DD",
+      codeInlineBg: "#EAE6D2",
+      codeBlockBg: "#E4DFC8",
+      codeInk: "#4A2B14",
+      codeBorder: "#C7AD7F",
+    },
+  },
+];
+
+export function resolveThemeById(themeId: string, customThemes: readonly CustomTheme[] = []): CustomTheme {
+  const foundCustom = customThemes.find((t) => t.id === themeId);
+  if (foundCustom) return foundCustom;
+  const foundBuiltin = BUILTIN_THEMES.find((t) => t.id === themeId);
+  if (foundBuiltin) return foundBuiltin;
+  return BUILTIN_THEMES[0]!;
+}

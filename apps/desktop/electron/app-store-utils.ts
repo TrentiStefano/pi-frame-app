@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import type { SessionCatalogEntry, WorkspaceCatalogEntry, WorktreeCatalogEntry } from "@pi-gui/catalogs";
-import { sessionKey } from "@pi-gui/pi-sdk-driver";
-import type { SessionAttachment, SessionConfig, SessionQueuedMessage, SessionRef } from "@pi-gui/session-driver";
+import type { SessionCatalogEntry, WorkspaceCatalogEntry, WorktreeCatalogEntry } from "@pi-frame/catalogs";
+import { sessionKey } from "@pi-frame/pi-sdk-driver";
+import type { SessionAttachment, SessionConfig, SessionQueuedMessage, SessionRef } from "@pi-frame/session-driver";
 import type {
   ComposerAttachment,
   QueuedComposerMessage,
@@ -291,7 +291,7 @@ export function cloneTranscriptMessage(message: TranscriptMessage): TranscriptMe
 }
 
 export function cloneComposerAttachment(attachment: ComposerAttachment): ComposerAttachment {
-  if (attachment.kind === "file") {
+  if (attachment.kind === "file" || attachment.kind === "browser-element") {
     return { ...attachment };
   }
   return {
@@ -312,9 +312,11 @@ export function cloneComposerAttachments(
 export function toSessionAttachments(
   attachments: readonly ComposerAttachment[],
 ): SessionAttachment[] {
-  return attachments.map((attachment) =>
-    attachment.kind === "image" ? toImageAttachmentPayload(attachment) : toFileAttachmentPayload(attachment),
-  );
+  return attachments.map((attachment) => {
+    if (attachment.kind === "image") return toImageAttachmentPayload(attachment);
+    if (attachment.kind === "file") return toFileAttachmentPayload(attachment);
+    return toBrowserElementAttachmentPayload(attachment);
+  });
 }
 
 export function toSessionQueuedMessages(
@@ -359,9 +361,11 @@ export function mergeQueuedComposerMessages(
 export function toTranscriptAttachments(
   attachments: readonly ComposerAttachment[],
 ): NonNullable<Extract<TranscriptMessage, { kind: "message" }>["attachments"]> {
-  return attachments.map((attachment) =>
-    attachment.kind === "image" ? toImageAttachmentPayload(attachment) : toFileAttachmentPayload(attachment),
-  );
+  return attachments.map((attachment) => {
+    if (attachment.kind === "image") return toImageAttachmentPayload(attachment);
+    if (attachment.kind === "file") return toFileAttachmentPayload(attachment);
+    return toBrowserElementAttachmentPayload(attachment);
+  });
 }
 
 function toImageAttachmentPayload({
@@ -392,6 +396,20 @@ function toFileAttachmentPayload({
   };
 }
 
+function toBrowserElementAttachmentPayload(
+  attachment: Extract<ComposerAttachment, { readonly kind: "browser-element" }>,
+) {
+  return {
+    ...attachment,
+    element: {
+      ...attachment.element,
+      attributes: { ...attachment.element.attributes },
+      locator: { ...attachment.element.locator },
+      ancestors: attachment.element.ancestors.map((ancestor) => ({ ...ancestor })),
+    },
+  };
+}
+
 function mergeQueuedComposerAttachments(
   previous: readonly ComposerAttachment[] | undefined,
   next: readonly SessionAttachment[] | undefined,
@@ -403,7 +421,20 @@ function mergeQueuedComposerAttachments(
 
   return next.map((attachment, index) => {
     const existing = previous?.[index];
-    if (existing && existing.kind === attachment.kind && existing.name === attachment.name && existing.mimeType === attachment.mimeType) {
+    if (
+      existing?.kind === "browser-element" &&
+      attachment.kind === "browser-element" &&
+      existing.id === attachment.id
+    ) {
+      return existing;
+    }
+    if (
+      existing &&
+      attachment.kind !== "browser-element" &&
+      existing.kind === attachment.kind &&
+      existing.name === attachment.name &&
+      existing.mimeType === attachment.mimeType
+    ) {
       if (existing.kind === "image" && attachment.kind === "image" && existing.data === attachment.data) {
         return existing;
       }
@@ -424,6 +455,14 @@ function mergeQueuedComposerAttachments(
         name: attachment.name ?? `Image ${index + 1}`,
         mimeType: attachment.mimeType,
         data: attachment.data,
+      } satisfies ComposerAttachment;
+    }
+
+
+    if (attachment.kind === "browser-element") {
+      return {
+        ...attachment,
+        id: attachment.id || `${messageId}:browser-element:${index}:${randomUUID()}`,
       } satisfies ComposerAttachment;
     }
 
@@ -472,7 +511,41 @@ function normalizeComposerAttachment(value: Record<string, unknown>): ComposerAt
     };
   }
 
+  if (
+    value.kind === "browser-element" &&
+    typeof value.id === "string" &&
+    typeof value.name === "string" &&
+    typeof value.tabId === "string" &&
+    typeof value.capturedAt === "string" &&
+    isBrowserPage(value.page) &&
+    typeof value.frameUrl === "string" &&
+    isBrowserElement(value.element)
+  ) {
+    return value as unknown as ComposerAttachment;
+  }
+
   return null;
+}
+
+function isBrowserPage(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const page = value as Record<string, unknown>;
+  return typeof page.url === "string" && typeof page.title === "string" && typeof page.revision === "number";
+}
+
+function isBrowserElement(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const element = value as Record<string, unknown>;
+  if (typeof element.tag !== "string" || !element.attributes || typeof element.attributes !== "object") return false;
+  const locator = element.locator;
+  return Boolean(
+    locator &&
+      typeof locator === "object" &&
+      typeof (locator as Record<string, unknown>).kind === "string" &&
+      typeof (locator as Record<string, unknown>).value === "string" &&
+      typeof (locator as Record<string, unknown>).unique === "boolean" &&
+      Array.isArray(element.ancestors),
+  );
 }
 
 export function makeActivityItem(

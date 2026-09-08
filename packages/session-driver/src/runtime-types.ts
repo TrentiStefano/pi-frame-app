@@ -33,6 +33,9 @@ export interface RuntimeModelRecord {
   readonly authType: RuntimeAuthType;
   readonly reasoning: boolean;
   readonly supportsImages: boolean;
+  readonly thinkingLevels?: readonly ("off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max")[];
+  readonly contextWindow?: number;
+  readonly maxTokens?: number;
 }
 
 export interface RuntimeSkillRecord {
@@ -63,6 +66,20 @@ export interface RuntimeExtensionRecord {
   readonly flags: readonly string[];
   readonly shortcuts: readonly string[];
   readonly diagnostics: readonly RuntimeExtensionDiagnostic[];
+}
+
+export interface RuntimePackageUpdate {
+  readonly source: string;
+  readonly displayName: string;
+  readonly type: "npm" | "git";
+  readonly scope: Exclude<RuntimeSourceScope, "temporary">;
+}
+
+export interface RuntimeConfiguredPackage {
+  readonly source: string;
+  readonly scope: "user" | "project";
+  readonly filtered: boolean;
+  readonly installed: boolean;
 }
 
 export interface RuntimeCommandRecord {
@@ -134,6 +151,11 @@ export interface RuntimeLoginCallbacks {
 export interface RuntimeResourceDriver {
   getRuntimeSnapshot(workspace: WorkspaceRef): Promise<RuntimeSnapshot>;
   refreshRuntime(workspace: WorkspaceRef): Promise<RuntimeSnapshot>;
+  checkForExtensionUpdates(workspace: WorkspaceRef): Promise<readonly RuntimePackageUpdate[]>;
+  updateExtensions(workspace: WorkspaceRef, sources?: readonly string[]): Promise<RuntimeSnapshot>;
+  listPackages(workspace: WorkspaceRef): Promise<readonly RuntimeConfiguredPackage[]>;
+  installPackage(workspace: WorkspaceRef, source: string, scope: "user" | "project"): Promise<RuntimeSnapshot>;
+  removePackage(workspace: WorkspaceRef, source: string, scope: "user" | "project"): Promise<RuntimeSnapshot>;
   login(workspace: WorkspaceRef, providerId: string, callbacks: RuntimeLoginCallbacks): Promise<RuntimeSnapshot>;
   logout(workspace: WorkspaceRef, providerId: string): Promise<RuntimeSnapshot>;
   setProviderApiKey(workspace: WorkspaceRef, providerId: string, apiKey: string): Promise<RuntimeSnapshot>;

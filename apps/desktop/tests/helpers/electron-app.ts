@@ -1,12 +1,12 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, realpath, rename, writeFile } from "node:fs/promises";
+import { access, copyFile, cp, mkdir, mkdtemp, readFile, readdir, realpath, rename, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { basename, delimiter, dirname, extname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import { expect, type Page } from "@playwright/test";
 import { _electron as electron, type ElectronApplication } from "playwright";
-import type { SessionDriverEvent, SessionRef } from "@pi-gui/session-driver";
+import type { SessionDriverEvent, SessionRef } from "@pi-frame/session-driver";
 import type { PiDesktopApi } from "../../src/ipc";
 import type {
   DesktopAppState,
@@ -16,11 +16,21 @@ import type {
   WorkspaceRecord,
 } from "../../src/desktop-state";
 
-const desktopDir = resolve(__dirname, "..", "..");
+const workingDirectory = process.cwd();
+const desktopDir = typeof __dirname === "string"
+  ? resolve(__dirname, "..", "..")
+  : basename(workingDirectory) === "desktop"
+    ? workingDirectory
+    : resolve(workingDirectory, "apps", "desktop");
+const moduleFilename = typeof __filename === "string"
+  ? __filename
+  : join(desktopDir, "tests", "helpers", "electron-app.ts");
 const packagedReleaseDir = join(desktopDir, "release");
-const nativeClipboardImagePath = resolve(__dirname, "..", "..", "..", "website", "public", "og.png");
+const nativeClipboardImagePath = resolve(desktopDir, "..", "website", "public", "og.png");
 const execFileAsync = promisify(execFile);
-const require = createRequire(__filename);
+const require = createRequire(moduleFilename);
+const { augmentMacPath } = require("../../scripts/augment-path.cjs");
+process.env.PATH = augmentMacPath().path;
 const electronExecutablePath = require("electron") as string;
 const REAL_AUTH_ENV_VAR = "PI_APP_REAL_AUTH";
 const REAL_AUTH_SOURCE_DIR_ENV_VAR = "PI_APP_REAL_AUTH_SOURCE_DIR";
@@ -67,6 +77,7 @@ export interface LaunchDesktopOptions {
   readonly testMode?: DesktopTestMode;
   readonly agentDir?: string;
   readonly realAuthSourceDir?: string;
+  readonly excludeRealAuthPackages?: boolean;
   readonly enabledModels?: readonly string[];
   readonly scrubProviderEnv?: boolean;
   readonly envOverrides?: Readonly<Record<string, string | undefined>>;
@@ -154,8 +165,7 @@ export async function launchPackagedDesktop(
   const normalized = Array.isArray(options) ? { initialWorkspaces: options } : options;
   const agentDir = await prepareAgentDir(userDataDir, normalized);
   const env = buildDesktopLaunchEnv(userDataDir, agentDir, normalized);
-  const releaseDir = resolvePackagedReleaseDir(process.env.PI_APP_TEST_RELEASE_DIR);
-  const executablePath = await resolvePackagedAppExecutable(releaseDir);
+  const executablePath = await resolvePackagedAppExecutable();
   return launchDesktopExecutable(executablePath, env);
 }
 
@@ -189,7 +199,7 @@ function createDesktopHarness(electronApp: ElectronApplication): DesktopHarness 
 
   async function getWindow(): Promise<Page> {
     if (!page) {
-      page = await electronApp.firstWindow();
+      page = await electronApp.firstWindow({ timeout: 60_000 });
       await page.waitForLoadState("domcontentloaded");
       await page.waitForFunction(() => Boolean((window as PiAppWindow).piApp), undefined, {
         timeout: 15_000,
@@ -317,6 +327,12 @@ async function prepareAgentDir(
   const agentDir = join(userDataDir, "agent");
   if (options.realAuthSourceDir) {
     await seedAgentDirFromRealAuth(agentDir, options.realAuthSourceDir);
+    if (options.excludeRealAuthPackages) {
+      const settingsPath = join(agentDir, "settings.json");
+      const settings = await readJsonObject(settingsPath);
+      const { packages: _packages, ...settingsWithoutPackages } = settings;
+      await writeFile(settingsPath, `${JSON.stringify(settingsWithoutPackages, null, 2)}\n`, "utf8");
+    }
     await writeAgentEnabledModels(agentDir, options.enabledModels);
     return agentDir;
   }
@@ -422,21 +438,74 @@ export async function resolvePackagedAppBundle(releaseDir = packagedReleaseDir):
   } catch (error) {
     if (isMissingPathError(error)) {
       throw new Error(
-        `Packaged release directory not found: ${releaseDir}. Run pnpm --filter @pi-gui/desktop run package:dir first.`,
+        `Packaged release directory not found: ${releaseDir}. Run pnpm --filter @pi-frame/desktop run package:dir first.`,
       );
     }
     throw error;
   }
 
-  const appBundle = appBundles.find((candidate) => basename(candidate) === "pi-gui.app") ?? appBundles[0];
+  const appBundle = appBundles[0];
   if (!appBundle) {
-    throw new Error(`No .app bundle found under ${releaseDir}. Run pnpm --filter @pi-gui/desktop run package:dir first.`);
+    throw new Error(`No .app bundle found under ${releaseDir}. Run pnpm --filter @pi-frame/desktop run package:dir first.`);
   }
 
   return appBundle;
 }
 
-export async function resolvePackagedAppExecutable(releaseDir = packagedReleaseDir): Promise<string> {
+export async function resolvePackagedAppExecutable(
+  releaseDir = resolvePackagedReleaseDir(process.env.PI_APP_TEST_RELEASE_DIR) ?? packagedReleaseDir,
+): Promise<string> {
+  if (process.platform === "win32") {
+    let entries;
+    try {
+      entries = await readdir(releaseDir, { withFileTypes: true });
+    } catch (error) {
+      if (isMissingPathError(error)) {
+        throw new Error(
+          `Packaged release directory not found: ${releaseDir}. ` +
+            "Run pnpm --filter @pi-frame/desktop run package:win:dir first.",
+        );
+      }
+      throw error;
+    }
+
+    const unpackedDirs = entries
+      .filter((entry) => entry.isDirectory() && entry.name.endsWith("-unpacked"))
+      .sort((left, right) => Number(right.name === "win-unpacked") - Number(left.name === "win-unpacked"));
+    for (const unpackedDir of unpackedDirs) {
+      const executablePath = join(releaseDir, unpackedDir.name, "pi-frame.exe");
+      try {
+        await access(executablePath);
+        return executablePath;
+      } catch (error) {
+        if (!isMissingPathError(error)) {
+          throw error;
+        }
+      }
+    }
+
+    throw new Error(
+      `No packaged Windows executable found under ${releaseDir}. ` +
+        "Run pnpm --filter @pi-frame/desktop run package:win:dir first.",
+    );
+  }
+
+  if (process.platform === "linux") {
+    const executablePath = join(releaseDir, "linux-unpacked", "pi-frame");
+    try {
+      await access(executablePath);
+      return executablePath;
+    } catch (error) {
+      if (!isMissingPathError(error)) {
+        throw error;
+      }
+    }
+    throw new Error(
+      `No packaged Linux executable found under ${releaseDir}. ` +
+        "Build the Linux --dir target before running packaged tests.",
+    );
+  }
+
   return resolveAppBundleExecutable(await resolvePackagedAppBundle(releaseDir));
 }
 
@@ -463,7 +532,7 @@ export async function resolvePackagedReleaseZip(releaseDir = packagedReleaseDir)
     entries.find((entry) => entry.isFile() && entry.name.endsWith(".zip"));
 
   if (!zipEntry) {
-    throw new Error(`No packaged macOS release zip found under ${releaseDir}. Run pnpm --filter @pi-gui/desktop run package first.`);
+    throw new Error(`No packaged macOS release zip found under ${releaseDir}. Run pnpm --filter @pi-frame/desktop run package first.`);
   }
 
   return join(releaseDir, zipEntry.name);
@@ -471,7 +540,7 @@ export async function resolvePackagedReleaseZip(releaseDir = packagedReleaseDir)
 
 export async function extractPackagedReleaseZipAppBundle(
   releaseDir = packagedReleaseDir,
-  appName = "pi-gui 2.app",
+  appName = "pi-frame.app",
 ): Promise<string> {
   const zipPath = await resolvePackagedReleaseZip(releaseDir);
   return extractAppBundleFromReleaseZip(zipPath, appName);
@@ -479,9 +548,9 @@ export async function extractPackagedReleaseZipAppBundle(
 
 export async function extractAppBundleFromReleaseZip(
   zipPath: string,
-  appName = "pi-gui 2.app",
+  appName = "pi-frame.app",
 ): Promise<string> {
-  const extractionDir = await mkdtemp(join(tmpdir(), "pi-gui-release-zip-"));
+  const extractionDir = await mkdtemp(join(tmpdir(), "pi-frame-release-zip-"));
   await execFileAsync("ditto", ["-x", "-k", zipPath, extractionDir]);
 
   const extractedAppBundle = await resolvePackagedAppBundle(extractionDir);
@@ -531,7 +600,7 @@ function isMissingPathError(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
 
-export async function makeUserDataDir(prefix = "pi-gui-user-data-"): Promise<string> {
+export async function makeUserDataDir(prefix = "pi-frame-user-data-"): Promise<string> {
   return mkdtemp(join(tmpdir(), prefix));
 }
 
@@ -856,7 +925,7 @@ async function withAgentDirEnv<T>(agentDir: string, action: () => Promise<T>): P
 }
 
 export async function makeWorkspace(name: string): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "pi-gui-workspace-"));
+  const root = await mkdtemp(join(tmpdir(), "pi-frame-workspace-"));
   const workspacePath = join(root, name);
   await mkdir(workspacePath, { recursive: true });
   await writeFile(join(workspacePath, "README.md"), `# ${name}\n`, "utf8");
@@ -885,7 +954,7 @@ export async function writeProjectExtension(
 export async function initGitRepo(workspacePath: string): Promise<void> {
   await execFileAsync("git", ["init", "-b", "main"], { cwd: workspacePath });
   await execFileAsync("git", ["config", "user.name", "Pi App Tests"], { cwd: workspacePath });
-  await execFileAsync("git", ["config", "user.email", "pi-gui-tests@example.com"], { cwd: workspacePath });
+  await execFileAsync("git", ["config", "user.email", "pi-frame-tests@example.com"], { cwd: workspacePath });
 }
 
 export async function commitAllInGitRepo(workspacePath: string, message: string): Promise<void> {
@@ -1095,6 +1164,28 @@ export async function getOpenDialogInvocationCount(harness: DesktopHarness): Pro
   });
 }
 
+export async function stubNextSaveDialog(
+  harness: DesktopHarness,
+  filePath: string,
+): Promise<void> {
+  await harness.electronApp.evaluate(({ dialog }, nextFilePath) => {
+    const original = dialog.showSaveDialog;
+    (globalThis as { __PI_TEST_SAVE_DIALOG_COUNT?: number }).__PI_TEST_SAVE_DIALOG_COUNT = 0;
+    dialog.showSaveDialog = async (..._args: Parameters<typeof dialog.showSaveDialog>) => {
+      dialog.showSaveDialog = original;
+      const globals = globalThis as { __PI_TEST_SAVE_DIALOG_COUNT?: number };
+      globals.__PI_TEST_SAVE_DIALOG_COUNT = (globals.__PI_TEST_SAVE_DIALOG_COUNT ?? 0) + 1;
+      return { canceled: false, filePath: nextFilePath };
+    };
+  }, filePath);
+}
+
+export async function getSaveDialogInvocationCount(harness: DesktopHarness): Promise<number> {
+  return harness.electronApp.evaluate(() => {
+    return (globalThis as { __PI_TEST_SAVE_DIALOG_COUNT?: number }).__PI_TEST_SAVE_DIALOG_COUNT ?? 0;
+  });
+}
+
 export async function triggerNativeOpenFolderShortcut(harness: DesktopHarness): Promise<void> {
   await harness.electronApp.evaluate(({ BrowserWindow }) => {
     BrowserWindow.getAllWindows()[0]?.webContents.sendInputEvent({
@@ -1166,6 +1257,17 @@ export async function getDesktopState(window: Page): Promise<DesktopAppState> {
   return state;
 }
 
+export async function openExtensionsSurfaceForTest(window: Page): Promise<void> {
+  await window.evaluate(async () => {
+    const app = (window as PiAppWindow).piApp;
+    if (!app) {
+      throw new Error("piApp IPC bridge is unavailable");
+    }
+    await app.setActiveView("extensions");
+  });
+  await expect(window.getByTestId("extensions-surface")).toBeVisible();
+}
+
 export async function getSelectedTranscript(window: Page): Promise<SelectedTranscriptRecord | null> {
   return window.evaluate(async () => {
     const app = (window as PiAppWindow).piApp;
@@ -1174,87 +1276,6 @@ export async function getSelectedTranscript(window: Page): Promise<SelectedTrans
     }
     return app.getSelectedTranscript();
   });
-}
-
-export async function waitForSelectedSessionReady(
-  window: Page,
-  target: {
-    readonly sessionId: string;
-    readonly workspaceId?: string;
-  },
-  timeout = 15_000,
-): Promise<void> {
-  let expectedComposerDraft = "";
-  let expectedTitle = "";
-
-  await expect
-    .poll(
-      async () => {
-        const [state, selectedTranscript] = await Promise.all([
-          getDesktopState(window),
-          getSelectedTranscript(window),
-        ]);
-        const workspace = state.workspaces.find(
-          (entry) =>
-            (!target.workspaceId || entry.id === target.workspaceId) &&
-            entry.sessions.some((session) => session.id === target.sessionId),
-        );
-        const session = workspace?.sessions.find((entry) => entry.id === target.sessionId);
-        if (
-          !workspace ||
-          !session ||
-          !state.runtimeByWorkspace[workspace.id] ||
-          state.selectedWorkspaceId !== workspace.id ||
-          state.selectedSessionId !== session.id ||
-          selectedTranscript?.workspaceId !== workspace.id ||
-          selectedTranscript.sessionId !== session.id
-        ) {
-          return false;
-        }
-        expectedComposerDraft = state.composerDraft;
-        expectedTitle = session.title;
-        return true;
-      },
-      {
-        intervals: [50, 100, 250, 500],
-        message: `wait for selected session ${target.sessionId} to finish hydrating`,
-        timeout,
-      },
-    )
-    .toBe(true);
-
-  await expect(window.locator(".topbar__session")).toHaveText(expectedTitle, { timeout });
-  await expect(window.getByTestId("transcript-skeleton")).toHaveCount(0, { timeout });
-  await expect(window.getByTestId("composer")).toHaveValue(expectedComposerDraft, { timeout });
-
-  let previousLayout = "";
-  await expect
-    .poll(
-      async () => {
-        const layout = await window.evaluate(() => {
-          const composer = document.querySelector<HTMLElement>('[data-testid="composer-surface"]');
-          const timeline = document.querySelector<HTMLElement>('[data-testid="timeline-pane"]');
-          if (!composer || !timeline) {
-            return "";
-          }
-          return [
-            composer.getBoundingClientRect().height,
-            timeline.getBoundingClientRect().height,
-            timeline.clientHeight,
-            timeline.scrollHeight,
-          ].join(":");
-        });
-        const stable = Boolean(layout) && layout === previousLayout;
-        previousLayout = layout;
-        return stable;
-      },
-      {
-        intervals: [50, 100, 250],
-        message: `wait for selected session ${target.sessionId} layout to settle`,
-        timeout,
-      },
-    )
-    .toBe(true);
 }
 
 export interface TimelineScrollMetrics {
@@ -1730,7 +1751,7 @@ export async function openNewThread(window: Page): Promise<void> {
 export async function expectNewThreadWorkspace(window: Page, workspacePath: string): Promise<void> {
   const workspace = await waitForWorkspaceByPath(window, workspacePath);
   await expect(window.getByTestId("new-thread-composer")).toBeVisible({ timeout: 15_000 });
-  await expect(window.locator(".new-thread__workspace")).toHaveValue(workspace.id);
+  await expect(window.getByTestId("new-thread-workspace-picker")).toHaveAttribute("data-workspace-id", workspace.id);
 }
 
 export async function startThreadFromSurface(
@@ -1749,7 +1770,8 @@ export async function startThreadFromSurface(
 
   await openNewThread(window);
   if (workspaceName) {
-    await window.locator(".new-thread__workspace").selectOption({ label: workspaceName });
+    await window.getByTestId("new-thread-workspace-picker").click();
+    await window.getByRole("menuitemradio", { name: workspaceName, exact: true }).click();
   }
   if (environment === "worktree") {
     await window.getByRole("button", { name: "Worktree", exact: true }).click();

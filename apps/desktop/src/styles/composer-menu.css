@@ -1,0 +1,132 @@
+.composer-select__trigger {
+  min-width: 0;
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 7px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-lg);
+  background: transparent;
+  color: var(--muted-strong);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 550;
+  letter-spacing: 0;
+  text-align: left;
+}
+
+.composer-select__trigger:hover,
+.composer-select__trigger[aria-expanded="true"] {
+  background: var(--overlay-hover);
+  color: var(--text-strong);
+}
+
+.composer-select__trigger:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.composer-select__icon,
+.composer-select__chevron,
+.composer-select__option-icon,
+.composer-select__check {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  display: grid;
+  place-items: center;
+}
+
+.composer-select__icon svg,
+.composer-select__chevron svg,
+.composer-select__option-icon svg,
+.composer-select__check svg {
+  width: 14px;
+  height: 14px;
+}
+
+.composer-select__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-select__chevron {
+  width: 12px;
+  flex-basis: 12px;
+  color: var(--muted-soft);
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+
+.composer-select__trigger[aria-expanded="true"] .composer-select__chevron {
+  transform: rotate(180deg);
+}
+
+.composer-select__menu {
+  position: absolute;
+  left: 0;
+  z-index: 20;
+  min-width: 280px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xl);
+  background: var(--surface);
+  box-shadow: var(--elevation-menu);
+}
+
+.composer-select__menu--below {
+  top: calc(100% + 6px);
+}
+
+.composer-select__option {
+  width: 100%;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 9px;
+  border-radius: var(--radius-md);
+  color: var(--muted-strong);
+  font-size: 13px;
+  text-align: left;
+}
+
+.composer-select__option:hover,
+.composer-select__option:focus-visible {
+  outline: none;
+  background: var(--overlay-hover);
+  color: var(--text-strong);
+}
+
+.composer-select__option--selected {
+  background: var(--overlay-subtle);
+  color: var(--text-strong);
+}
+
+.composer-select__option-copy {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 2px;
+}
+
+.composer-select__option-label,
+.composer-select__option-description {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-select__option-description {
+  color: var(--muted-soft);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.composer-select__check {
+  margin-left: auto;
+  color: var(--text-strong);
+}

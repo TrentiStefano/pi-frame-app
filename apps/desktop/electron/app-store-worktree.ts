@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
-import { sessionKey } from "@pi-gui/pi-sdk-driver";
-import type { WorktreeCatalogEntry } from "@pi-gui/catalogs";
-import type { WorkspaceRef } from "@pi-gui/session-driver";
+import { homedir } from "node:os";
+import { sessionKey } from "@pi-frame/pi-sdk-driver";
+import type { WorktreeCatalogEntry } from "@pi-frame/catalogs";
+import type { WorkspaceRef } from "@pi-frame/session-driver";
 import type {
   CreateWorktreeInput,
   DesktopAppState,
@@ -14,6 +15,8 @@ import type {
 import { sendMessageToSession } from "./app-store-composer";
 import type { CreateWorktreeOptions } from "./worktree-manager";
 import type { AppStoreInternals } from "./app-store-internals";
+import type { PendingAutoTitle } from "./session-state-map";
+import { replaceSessionTitle } from "./app-store-session-state";
 import { NEW_THREAD_PLACEHOLDER_TITLE } from "./thread-title-constants";
 
 /* ── Public methods ─────────────────────────────────────── */
@@ -132,11 +135,25 @@ export async function startThread(store: AppStoreInternals, input: StartThreadIn
       throw error;
     }
     const key = sessionKey(session.ref);
+    if (input.collaborationMode === "plan") {
+      store.sessionState.collaborationModeBySession.set(key, "plan");
+      try {
+        await store.persistUiState();
+        await store.driver.reloadSession(session.ref);
+        await store.refreshSessionCommandsFor(session.ref);
+      } catch (error) {
+        store.sessionState.collaborationModeBySession.delete(key);
+        await store.persistUiState();
+        await store.driver.deleteSession(session.ref).catch(() => undefined);
+        if (rollbackWorktree) await rollbackWorktree();
+        throw error;
+      }
+    }
     store.sessionState.transcriptCache.set(key, []);
     store.sessionState.loadedTranscriptKeys.add(key);
     store.updateSessionConfig(session.ref, session.config);
     const autoTitleAbortController = new AbortController();
-    const pendingAutoTitle = {
+    const pendingAutoTitle: PendingAutoTitle = {
       requestToken: randomUUID(),
       cancel: () => autoTitleAbortController.abort(),
     };
@@ -158,7 +175,9 @@ export async function startThread(store: AppStoreInternals, input: StartThreadIn
       clearLastError: true,
       refreshWorktrees: input.environment === "worktree",
       activeView: "threads",
+      persistState: false,
     });
+    store.schedulePersistUiState();
 
     // Fire message in background — assistantDelta events flow through
     // handleSessionEvent → emit() and update React while on the thread view
@@ -254,7 +273,7 @@ export async function forkThread(store: AppStoreInternals, input: ForkThreadInpu
     // Load the branched history transcript from the driver before publishing state.
     await store.reloadTranscriptFromDriver(session.ref);
 
-    return store.refreshState({
+    const state = await store.refreshState({
       selectedWorkspaceId: session.ref.workspaceId,
       selectedSessionId: session.ref.sessionId,
       composerDraft: selectedText ?? "",
@@ -263,6 +282,11 @@ export async function forkThread(store: AppStoreInternals, input: ForkThreadInpu
       refreshWorktrees: input.environment === "worktree",
       activeView: "threads",
     });
+    // The eager selection above makes refreshState's previous-selection comparison
+    // observe the new key. Publish once after state reaches the renderer so the
+    // selected transcript cannot remain stuck at the loading placeholder.
+    store.publishSelectedTranscript();
+    return state;
   });
 }
 
@@ -378,7 +402,7 @@ export function buildWorktreeOptions(
   const repoName = clampSlug(slugify(basename(workspace.path) || "repo"), 20);
   const displayName = preferredTitle || `Worktree ${suffix}`;
   return {
-    path: join(store.worktreeRoot, repoName, folderName),
+    path: join(homedir(), ".pi", "worktrees", repoName, folderName),
     displayName,
     branchName: `pi/${folderName}`,
     startPoint: "HEAD",
@@ -386,14 +410,13 @@ export function buildWorktreeOptions(
 }
 
 /**
- * Startup reconcile pass (fix: worktree/branch GC). Only the active profile's
- * user-data-namespaced root is eligible for automatic collection. Cataloged
- * worktrees under the legacy shared ~/.pi/worktrees root remain usable, but are
- * intentionally never adopted or pruned because their profile ownership is
- * ambiguous.
+ * Startup reconcile pass (fix: worktree/branch GC). Removes git worktrees under
+ * the app's worktree root that no longer have a catalog or session reference,
+ * skipping any that are dirty. Safe to call fire-and-forget on store init.
  */
 export async function reconcileWorktrees(store: AppStoreInternals): Promise<void> {
   try {
+    const worktreeRoot = join(homedir(), ".pi", "worktrees");
     const referencedPaths = new Set<string>();
     const catalog = await store.catalogStore.worktrees.listWorktrees();
     for (const worktree of catalog.worktrees) {
@@ -404,10 +427,7 @@ export async function reconcileWorktrees(store: AppStoreInternals): Promise<void
     for (const workspace of store.state.workspaces) {
       referencedPaths.add(await canonicalWorktreePath(workspace.path));
     }
-    await store.worktreeManager.pruneOrphanedWorktrees({
-      worktreeRoot: store.worktreeRoot,
-      referencedPaths,
-    });
+    await store.worktreeManager.pruneOrphanedWorktrees({ worktreeRoot, referencedPaths });
   } catch (error) {
     console.warn(`pi-gui: worktree reconcile skipped: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -449,6 +469,8 @@ async function generateAndApplyAutoTitle(
     readonly thinkingLevel?: string;
   },
 ): Promise<void> {
+  let projectedTitle: string | undefined;
+  let previousTitle: string | undefined;
   const clearMatchingPendingTitle = () => {
     const pendingAutoTitle = store.getPendingAutoTitle(sessionRef);
     if (pendingAutoTitle?.requestToken === options.requestToken) {
@@ -489,15 +511,37 @@ async function generateAndApplyAutoTitle(
       return;
     }
 
-    store.clearPendingAutoTitle(sessionRef);
+    previousTitle = currentSession.title;
+    projectedTitle = generatedTitle;
+    pendingAutoTitle.projectedTitle = generatedTitle;
+    publishSessionTitle(store, sessionRef, generatedTitle);
     await store.driver.renameSession(sessionRef, generatedTitle);
     await store.refreshState({ clearLastError: true });
+    clearMatchingPendingTitle();
   } catch (error) {
     // Auto-title is best-effort, but a swallowed rename failure must at least
     // be visible — the thread silently keeps its placeholder title otherwise.
     console.warn(`[app-store] auto-title failed for ${sessionRef.workspaceId}:${sessionRef.sessionId}:`, error);
     clearMatchingPendingTitle();
+    if (projectedTitle && previousTitle && store.sessionFromState(sessionRef)?.title === projectedTitle) {
+      publishSessionTitle(store, sessionRef, previousTitle);
+    }
   }
+}
+
+function publishSessionTitle(
+  store: AppStoreInternals,
+  sessionRef: { workspaceId: string; sessionId: string },
+  title: string,
+): void {
+  if (store.sessionFromState(sessionRef)?.title === title) {
+    return;
+  }
+  store.state = {
+    ...replaceSessionTitle(store.state, sessionRef, title),
+    revision: store.state.revision + 1,
+  };
+  store.emit();
 }
 
 function sessionTitleForWorktree(store: AppStoreInternals, workspaceId: string, sessionId: string): string | undefined {

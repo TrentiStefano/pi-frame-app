@@ -1,89 +1,133 @@
-import type { ThemeMode, ThemePresetId } from "./desktop-state";
+import { Moon, Sun, Download, Trash2, Palette } from "lucide-react";
+import { useTranslation } from "react-i18next";
+import type { ThemeMode } from "./desktop-state";
+import type { CustomTheme } from "./theme/types";
+import { BUILTIN_THEMES } from "./theme/builtin-themes";
 import { SettingsGroup, SettingsRow } from "./settings-utils";
-import { themePresets } from "./theme-presets";
 
 interface SettingsAppearanceSectionProps {
   readonly themeMode: ThemeMode;
-  readonly themePresetId: ThemePresetId;
+  readonly themeId: string;
+  readonly customThemes: readonly CustomTheme[];
   readonly onSetThemeMode: (mode: ThemeMode) => void;
-  readonly onSetThemePresetId: (presetId: ThemePresetId) => void;
-  readonly enableTransparency: boolean;
-  readonly onSetEnableTransparency: (enabled: boolean) => void;
+  readonly onSetThemeId: (themeId: string) => void;
+  readonly onImportVSCodeTheme: () => void;
+  readonly onDeleteCustomTheme: (themeId: string) => void;
 }
-
-const THEME_OPTIONS: { mode: ThemeMode; label: string; description: string }[] = [
-  { mode: "system", label: "System", description: "Follow your OS appearance setting" },
-  { mode: "light", label: "Light", description: "Always use the light theme" },
-  { mode: "dark", label: "Dark", description: "Always use the dark theme" },
-];
 
 export function SettingsAppearanceSection({
   themeMode,
-  themePresetId,
+  themeId,
+  customThemes,
   onSetThemeMode,
-  onSetThemePresetId,
-  enableTransparency,
-  onSetEnableTransparency,
+  onSetThemeId,
+  onImportVSCodeTheme,
+  onDeleteCustomTheme,
 }: SettingsAppearanceSectionProps) {
+  const { t } = useTranslation();
+
+  const allThemes = [...BUILTIN_THEMES, ...customThemes];
+  const activeThemeId = themeId || themeMode;
+
   return (
-    <>
-      <SettingsGroup title="Theme preset">
-        <div className="theme-preset-grid">
-          {themePresets.map((preset) => (
-            <label
-              className={`theme-preset-card${themePresetId === preset.id ? " theme-preset-card--active" : ""}`}
-              key={preset.id}
-            >
-              <input
-                checked={themePresetId === preset.id}
-                name="theme-preset"
-                type="radio"
-                onChange={() => onSetThemePresetId(preset.id)}
-              />
-              <span className="theme-preset-card__preview" aria-hidden="true">
-                {preset.swatches.map((swatch) => (
-                  <span
-                    className="theme-preset-card__swatch"
-                    key={swatch}
-                    style={{ background: swatch }}
-                  />
-                ))}
-              </span>
-              <span className="theme-preset-card__body">
-                <span className="theme-preset-card__title">{preset.name}</span>
-                <span className="theme-preset-card__description">{preset.description}</span>
-              </span>
-            </label>
-          ))}
+    <SettingsGroup>
+      <SettingsRow title={t("settings.colorMode", "Color Mode")} description={t("settings.colorModeDescription", "Choose your preferred appearance mode")}>
+        <div aria-label={t("settings.colorMode", "Color mode")} className="theme-mode-control" role="group">
+          <button
+            aria-pressed={themeMode === "light"}
+            className={`theme-mode-option${themeMode === "light" ? " theme-mode-option--active" : ""}`}
+            type="button"
+            onClick={() => {
+              onSetThemeMode("light");
+              onSetThemeId("light");
+            }}
+          >
+            <Sun aria-hidden size={15} strokeWidth={1.8} />
+            <span>{t("common.light", "Light")}</span>
+          </button>
+          <button
+            aria-pressed={themeMode === "dark"}
+            className={`theme-mode-option${themeMode === "dark" ? " theme-mode-option--active" : ""}`}
+            type="button"
+            onClick={() => {
+              onSetThemeMode("dark");
+              onSetThemeId("dark");
+            }}
+          >
+            <Moon aria-hidden size={15} strokeWidth={1.8} />
+            <span>{t("common.dark", "Dark")}</span>
+          </button>
         </div>
-      </SettingsGroup>
+      </SettingsRow>
 
-      <SettingsGroup title="Theme">
-        {THEME_OPTIONS.map((option) => (
-          <SettingsRow key={option.mode} title={option.label} description={option.description}>
-            <input
-              checked={themeMode === option.mode}
-              name="theme"
-              type="radio"
-              onChange={() => onSetThemeMode(option.mode)}
-            />
-          </SettingsRow>
-        ))}
-      </SettingsGroup>
+      <SettingsRow
+        title="Theme Preset & Custom Themes"
+        description="Select a built-in theme preset or import any VS Code JSON theme file"
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px", width: "100%" }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+            {allThemes.map((theme) => {
+              const isActive = activeThemeId === theme.id;
+              const isCustom = !theme.isBuiltin;
+              return (
+                <div
+                  key={theme.id}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "6px",
+                    padding: "6px 12px",
+                    borderRadius: "8px",
+                    border: isActive ? "2px solid var(--accent)" : "1px solid var(--line)",
+                    background: isActive ? "var(--accent-tint-bg)" : "var(--surface)",
+                    cursor: "pointer",
+                    fontSize: "13px",
+                    fontWeight: isActive ? 600 : 400,
+                  }}
+                  onClick={() => onSetThemeId(theme.id)}
+                >
+                  <Palette size={14} style={{ color: theme.cssVariables.accent || "var(--accent)" }} />
+                  <span>{theme.name}</span>
+                  {isCustom && (
+                    <button
+                      type="button"
+                      title="Remove custom theme"
+                      style={{
+                        background: "none",
+                        border: "none",
+                        padding: "2px",
+                        marginLeft: "4px",
+                        cursor: "pointer",
+                        color: "var(--muted)",
+                        display: "inline-flex",
+                        alignItems: "center",
+                      }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDeleteCustomTheme(theme.id);
+                      }}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
 
-      <SettingsGroup title="Visuals">
-        <SettingsRow
-          title="Window transparency"
-          description="Let desktop colors show through supported surfaces."
-        >
-          <input
-            aria-label="Window transparency"
-            type="checkbox"
-            checked={enableTransparency}
-            onChange={(event) => onSetEnableTransparency(event.currentTarget.checked)}
-          />
-        </SettingsRow>
-      </SettingsGroup>
-    </>
+          <div style={{ paddingTop: "4px" }}>
+            <button
+              type="button"
+              className="button button--ghost"
+              style={{ display: "inline-flex", alignItems: "center", gap: "8px" }}
+              onClick={onImportVSCodeTheme}
+            >
+              <Download size={15} />
+              <span>Import VS Code Theme (.json)</span>
+            </button>
+          </div>
+        </div>
+      </SettingsRow>
+    </SettingsGroup>
   );
 }

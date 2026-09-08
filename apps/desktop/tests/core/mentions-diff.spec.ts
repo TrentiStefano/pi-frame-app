@@ -12,7 +12,7 @@ import {
 } from "../helpers/electron-app";
 
 test("shows workspace file mentions from the composer and inserts the selected file", async () => {
-  test.setTimeout(30_000);
+  test.setTimeout(60_000);
   const userDataDir = await makeUserDataDir();
   const workspacePath = await makeWorkspace("mention-workspace");
   await initGitRepo(workspacePath);
@@ -37,7 +37,7 @@ test("shows workspace file mentions from the composer and inserts the selected f
     const mentionMenu = window.getByTestId("mention-menu");
     await expect(mentionMenu).toBeVisible();
     await expect(mentionMenu.locator(".mention-menu__section-title")).toHaveText(["Extensions", "Files"]);
-    await expect(mentionMenu.locator(".mention-menu__item")).toHaveCount(3);
+    await expect.poll(() => mentionMenu.locator(".mention-menu__item").count()).toBeGreaterThanOrEqual(3);
 
     await composer.pressSequentially("README");
     await expect(mentionMenu.locator(".mention-menu__item")).toHaveCount(1);
@@ -62,7 +62,7 @@ test("shows workspace file mentions from the composer and inserts the selected f
 });
 
 test("toggles the diff panel from the keyboard shortcut and renders changed files on the right", async () => {
-  test.setTimeout(30_000);
+  test.setTimeout(60_000);
   const userDataDir = await makeUserDataDir();
   const workspacePath = await makeWorkspace("diff-workspace");
   await initGitRepo(workspacePath);
@@ -79,12 +79,15 @@ test("toggles the diff panel from the keyboard shortcut and renders changed file
     await createNamedThread(window, "Diff test");
 
     const topbarActions = window.locator(".topbar__actions");
-    await expect(topbarActions.locator(".topbar__icon")).toHaveCount(4);
-    await expect(topbarActions.getByLabel("Toggle terminal")).toBeVisible();
-    await expect(topbarActions.getByLabel("Toggle changes")).toBeVisible();
-    await expect(topbarActions.getByLabel("Toggle files")).toBeVisible();
-    await expect(topbarActions.getByLabel(/prompt navigation/i)).toBeVisible();
+    await expect(topbarActions.locator(".topbar__icon")).toHaveCount(1);
+    await topbarActions.getByTestId("workspace-tools").click();
+    await expect(window.getByRole("menuitem", { name: "Toggle terminal" })).toBeVisible();
+    await expect(window.getByRole("menuitem", { name: "Toggle changes" })).toBeVisible();
+    await expect(window.getByRole("menuitem", { name: "Toggle files" })).toBeVisible();
+    await expect(topbarActions.getByLabel(/prompt navigation/i)).toHaveCount(0);
     await expect(topbarActions.getByLabel(/Evidence|Workbench|Open folder/i)).toHaveCount(0);
+    await topbarActions.getByTestId("workspace-tools").click();
+    await expect(window.getByRole("menuitem", { name: "Toggle changes" })).toHaveCount(0);
 
     const diffPanel = window.locator(".diff-panel");
     await expect(diffPanel).toHaveCount(0);

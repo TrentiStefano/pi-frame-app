@@ -1,4 +1,4 @@
-import type { SessionTranscriptMessage, SessionTranscriptRole } from "@pi-gui/pi-sdk-driver";
+import type { SessionMessageUsage, SessionTranscriptMessage, SessionTranscriptRole } from "@pi-frame/pi-sdk-driver";
 
 export type SessionRole = SessionTranscriptRole;
 export type TimelineTone = "neutral" | "success" | "warning" | "error";
@@ -27,6 +27,7 @@ export interface TimelineToolCall {
   readonly createdAt: string;
   readonly input?: unknown;
   readonly output?: unknown;
+  readonly usage?: SessionMessageUsage;
 }
 
 export interface TimelineSummary {
@@ -40,6 +41,12 @@ export interface TimelineSummary {
 
 export type TranscriptMessage = SessionTranscriptMessage | TimelineActivity | TimelineToolCall | TimelineSummary;
 
+export interface TimelineToolGroup {
+  readonly kind: "tool-group";
+  readonly id: string;
+  readonly calls: readonly TimelineToolCall[];
+}
+
 /**
  * A derived, view-only marker inserted between turns to show how long the agent
  * worked on the preceding user prompt. Never persisted or produced by the store;
@@ -52,4 +59,4 @@ export interface TimelineTurnMarker {
   readonly durationMs: number;
 }
 
-export type DisplayTimelineItem = TranscriptMessage | TimelineTurnMarker;
+export type DisplayTimelineItem = TranscriptMessage | TimelineTurnMarker | TimelineToolGroup;

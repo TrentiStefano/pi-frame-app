@@ -14,7 +14,7 @@ test("opens the real macOS folder picker from the empty state button and adds th
     test.skip(true, String(error));
   }
 
-  const userDataDir = await makeUserDataDir("pi-gui-real-open-folder-");
+  const userDataDir = await makeUserDataDir("pi-frame-real-open-folder-");
   const workspacePath = await makeWorkspace("real-open-folder-workspace");
   const harness = await launchDesktop(userDataDir, { testMode: "foreground" });
 

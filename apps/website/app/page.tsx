@@ -6,16 +6,16 @@ import {
   SITE_URL,
 } from "./site";
 
-const GITHUB_URL = "https://github.com/minghinmatthewlam/pi-gui";
-const RELEASES_URL = "https://github.com/minghinmatthewlam/pi-gui/releases/latest";
-const PI_MONO_URL = "https://github.com/mariozechner/pi";
+const GITHUB_URL = "https://github.com/pi-frame/pi-frame";
+const RELEASES_URL = "https://github.com/pi-frame/pi-frame/releases/latest";
+const PI_MONO_URL = "https://github.com/earendil-works/pi";
 
 const softwareApplicationJsonLd = {
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
   name: SITE_NAME,
   applicationCategory: "DeveloperApplication",
-  operatingSystem: "macOS, Linux",
+  operatingSystem: "Windows, macOS, Linux",
   description: SITE_DESCRIPTION,
   url: SITE_URL,
   sameAs: [GITHUB_URL],
@@ -87,7 +87,7 @@ export default function Page() {
       {/* ===== Nav ===== */}
       <nav className="nav">
         <div className="nav-inner">
-          <span className="nav-logo">pi-gui</span>
+          <span className="nav-logo">pi-frame</span>
           <div className="nav-links">
             <a href="#features" className="nav-link">
               Features
@@ -130,7 +130,7 @@ export default function Page() {
               AI coding agents
             </h1>
             <p className="hero-subtitle">
-              pi-gui is a Codex-style macOS and Linux desktop app for the{" "}
+              pi-frame is a Codex-style Windows, macOS, and Linux desktop app for the{" "}
               <a
                 href={PI_MONO_URL}
                 target="_blank"
@@ -186,7 +186,7 @@ export default function Page() {
         <section className="value-prop">
           <div className="container container--narrow">
             <p>
-              From quick fixes to complex refactors, pi-gui gives you a
+              From quick fixes to complex refactors, pi-frame gives you a
               persistent desktop workspace for AI-powered coding sessions —
               with full visibility into what the agent is doing and why.
             </p>
@@ -234,7 +234,7 @@ export default function Page() {
                 <div className="feature-icon" aria-hidden="true"><WrenchIcon /></div>
                 <h3>Skills &amp; slash commands</h3>
                 <p>
-                  Extend pi-gui with workspace-specific skills and slash
+                  Extend pi-frame with workspace-specific skills and slash
                   commands for model switching, thinking levels, settings, and
                   custom workflows.
                 </p>
@@ -264,7 +264,7 @@ export default function Page() {
               .
             </p>
             <div className="tech-stack">
-              <span className="tech-chip">Electron 34</span>
+              <span className="tech-chip">Electron 37.10.3</span>
               <span className="tech-chip">React 19</span>
               <span className="tech-chip">TypeScript</span>
               <span className="tech-chip">Vite</span>
@@ -295,6 +295,13 @@ export default function Page() {
           </div>
         </section>
 
+        {/* ===== Lineage ===== */}
+        <section className="value-prop">
+          <div className="container container--narrow">
+            <p><strong>Lineage:</strong> pi-frame preserves attribution to pi-gui and pi-desktop, and is built on the upstream <a href={PI_MONO_URL} className="inline-link">pi</a> coding agent.</p>
+          </div>
+        </section>
+
         {/* ===== Get Started ===== */}
         <section id="get-started" className="get-started">
           <div className="container">
@@ -307,24 +314,11 @@ export default function Page() {
                 <span className="code-command">open</span>{" "}
                 {RELEASES_URL}
                 {"\n\n"}
-                <span className="code-comment"># Or install with Homebrew</span>
-                {"\n"}
-                <span className="code-command">brew tap</span>{" "}
-                minghinmatthewlam/tap
-                {"\n"}
-                <span className="code-command">brew install --cask</span>{" "}
-                pi-gui
-                {"\n\n"}
-                <span className="code-comment"># Later, update the Homebrew install</span>
-                {"\n"}
-                <span className="code-command">brew upgrade --cask</span>{" "}
-                pi-gui
-                {"\n\n"}
                 <span className="code-comment"># Source install is for local development</span>
                 {"\n"}
                 <span className="code-command">git clone</span>{" "}
                 {GITHUB_URL}.git{"\n"}
-                <span className="code-command">cd</span> pi-gui{"\n\n"}
+                <span className="code-command">cd</span> pi-frame{"\n\n"}
                 <span className="code-comment"># Install dependencies and run</span>
                 {"\n"}
                 <span className="code-command">pnpm install</span>
@@ -333,10 +327,7 @@ export default function Page() {
               </code>
             </div>
             <p className="section-subtitle">
-              DMG installs update from GitHub Releases. Homebrew installs update
-              with <code>brew upgrade --cask pi-gui</code>. During beta,
-              Homebrew upgrades may require re-confirming some macOS permissions
-              or Dock placement after reinstall-style updates.
+              Installers and portable artifacts are published through GitHub Releases. Windows, macOS, and Linux packaging follows the commands and platform guidance in the repository README.
             </p>
             <div className="hero-ctas">
               <a
@@ -365,7 +356,7 @@ export default function Page() {
       {/* ===== Footer ===== */}
       <footer className="footer">
         <div className="footer-inner">
-          <span>pi-gui</span>
+          <span>pi-frame</span>
           <span className="footer-sep">&middot;</span>
           <span>MIT License</span>
           <span className="footer-sep">&middot;</span>

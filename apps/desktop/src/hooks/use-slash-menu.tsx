@@ -1,5 +1,5 @@
 import { useEffect, useState, type Dispatch, type KeyboardEvent, type SetStateAction } from "react";
-import type { RuntimeCommandRecord, RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
+import type { RuntimeCommandRecord, RuntimeSnapshot } from "@pi-frame/session-driver/runtime-types";
 import type { DesktopAppState, ExtensionCommandCompatibilityRecord, SessionRecord, WorkspaceRecord } from "../desktop-state";
 import {
   buildModelOptions,
@@ -16,6 +16,7 @@ import {
 import type { PiDesktopApi } from "../ipc";
 import { deriveModelOnboardingState } from "../model-onboarding";
 import type { SettingsSection } from "../settings-view";
+import { useTranslation } from "react-i18next";
 
 interface ActiveSlashFlow {
   readonly command: ComposerSlashCommand;
@@ -79,6 +80,7 @@ interface UseSlashMenuParams {
   readonly onSelectThinkingOption?: (level: string) => void;
   readonly onSelectLoginProvider?: (providerId: string) => void;
   readonly onSelectLogoutProvider?: (providerId: string) => void;
+  readonly onTogglePlanMode?: () => void;
 }
 
 export interface SlashMenuState {
@@ -99,7 +101,36 @@ export interface SlashMenuState {
   readonly fillComposerFromSlash: (draft: string, options?: { suppressMenu?: boolean }) => void;
 }
 
+function localizeSlashSections(
+  sections: readonly ComposerSlashCommandSection[],
+  t: (key: string) => string,
+): readonly ComposerSlashCommandSection[] {
+  return sections.map((section) => ({
+    ...section,
+    items: section.items.map((command) => {
+      const key = command.kind;
+      const titleKey = `slash.${key}`;
+      const descriptionKey = `slash.${key}Description`;
+      return ["plan", "model", "thinking", "tree", "status", "login", "logout", "settings", "session", "name", "compact", "reload"].includes(key)
+        ? { ...command, title: t(titleKey), description: t(descriptionKey) }
+        : command;
+    }),
+  }));
+}
+
+function localizeSlashOptions(
+  options: readonly ComposerSlashOption[],
+  t: (key: string) => string,
+): readonly ComposerSlashOption[] {
+  return options.map((option) => {
+    const key = `modelSelector.thinking.${option.value}`;
+    const label = t(key);
+    return label === key ? option : { ...option, label };
+  });
+}
+
 export function useSlashMenu(params: UseSlashMenuParams): SlashMenuState {
+  const { t } = useTranslation();
   const {
     composerDraft,
     setComposerDraft,
@@ -123,6 +154,7 @@ export function useSlashMenu(params: UseSlashMenuParams): SlashMenuState {
     onSelectThinkingOption,
     onSelectLoginProvider,
     onSelectLogoutProvider,
+    onTogglePlanMode,
   } = params;
 
   const [slashIndex, setSlashIndex] = useState(0);
@@ -134,9 +166,9 @@ export function useSlashMenu(params: UseSlashMenuParams): SlashMenuState {
   const slashQuery = activeSlashQuery?.query ?? "";
   const slashSections =
     activeSlashQuery
-      ? buildSlashCommandSections(slashQuery, selectedRuntime, sessionCommands, commandCompatibility, {
+      ? localizeSlashSections(buildSlashCommandSections(slashQuery, selectedRuntime, sessionCommands, commandCompatibility, {
           allowTreeCommand,
-        })
+        }), t)
       : [];
   const slashSuggestions = flattenSlashSections(slashSections);
   const exactSlashCommand = slashSuggestions.find((cmd) => isExactSlashCommand(slashQuery, cmd));
@@ -152,7 +184,7 @@ export function useSlashMenu(params: UseSlashMenuParams): SlashMenuState {
   const slashOptions =
     activeSlashOptionCommand?.kind === "model"
       ? buildModelOptions(selectedModelRuntime)
-      : slashOptionsForCommand(activeSlashOptionCommand, selectedRuntime);
+      : localizeSlashOptions(slashOptionsForCommand(activeSlashOptionCommand, selectedRuntime), t);
   const activeSlashOptionEmptyState = slashOptionEmptyState(
     activeSlashOptionCommand,
     activeSlashOptionCommand?.kind === "model"
@@ -167,8 +199,8 @@ export function useSlashMenu(params: UseSlashMenuParams): SlashMenuState {
             modelId: undefined,
           });
           return {
-            title: state.emptyModelTitle,
-            description: state.emptyModelDescription,
+            title: t("modelSelector.noModels"),
+            description: t("modelSelector.noModelsDescription"),
           };
         })()
       : undefined;
@@ -255,13 +287,10 @@ export function useSlashMenu(params: UseSlashMenuParams): SlashMenuState {
       return;
     }
 
-    if (command.kind === "settings" || command.kind === "scoped-models") {
+    if (command.kind === "settings") {
       resetSlashUi();
       setComposerDraft("");
-      openSettings(
-        selectedWorkspace?.rootWorkspaceId ?? selectedWorkspace?.id,
-        command.kind === "scoped-models" ? "models" : undefined,
-      );
+      openSettings(selectedWorkspace?.rootWorkspaceId ?? selectedWorkspace?.id);
       return;
     }
 
@@ -269,6 +298,22 @@ export function useSlashMenu(params: UseSlashMenuParams): SlashMenuState {
       resetSlashUi();
       setComposerDraft("");
       onRunTreeCommand?.();
+      return;
+    }
+
+    if (command.kind === "plan" && activeSlashQuery?.isPrimary) {
+      resetSlashUi();
+      setComposerDraft("");
+      if (onTogglePlanMode) {
+        onTogglePlanMode();
+        focusComposer();
+        return;
+      }
+      if (!api) return;
+      void updateSnapshot(api, setSnapshot, () => api.submitComposer(command.command)).then((state) => {
+        setComposerDraft(state.composerDraft);
+        focusComposer();
+      });
       return;
     }
 

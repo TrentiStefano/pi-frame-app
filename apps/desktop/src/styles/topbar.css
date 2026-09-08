@@ -5,20 +5,23 @@
 
 .topbar {
   -webkit-app-region: drag;
-  padding: 8px 16px;
+  min-width: 0;
+  padding: 10px 20px 6px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  border-bottom: 1px solid var(--line);
-  background: var(--surface);
+  border-bottom: 0;
+  background: var(--main);
 }
 
 .topbar__title {
   display: flex;
+  flex: 1 1 auto;
   align-items: center;
   gap: 6px;
   min-width: 0;
+  overflow: hidden;
 }
 
 .environment-picker,
@@ -31,20 +34,24 @@
 }
 
 .environment-picker__button {
-  min-height: 24px;
-  padding: 0 10px;
-  border-radius: var(--radius-pill);
-  border: 1px solid var(--line);
-  background: var(--surface);
-  color: var(--muted-strong);
-  font-size: 12px;
-  font-weight: 560;
+  max-width: 220px;
 }
 
 .environment-picker__menu {
   left: 0;
   right: auto;
-  min-width: 190px;
+  min-width: 220px;
+}
+
+.environment-picker__item {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 9px;
+}
+
+.environment-picker__item[aria-checked="true"] {
+  background: var(--overlay-subtle);
 }
 
 .topbar__workspace,
@@ -73,7 +80,82 @@
 .empty-panel__actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
+}
+
+.topbar__actions {
+  flex: 0 0 auto;
+}
+
+.workspace-tools {
+  position: relative;
+  display: inline-flex;
+}
+
+.workspace-tools__button {
+  color: var(--muted-soft);
+}
+
+.workspace-tools__menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 70;
+  min-width: 208px;
+  display: grid;
+  gap: 2px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.workspace-tools__item {
+  min-height: 32px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 0 8px;
+  border-radius: var(--radius-sm);
+  color: var(--muted-strong);
+  font-size: 12px;
+  text-align: left;
+}
+
+.workspace-tools__item:hover:not(:disabled),
+.workspace-tools__item:focus-visible {
+  background: var(--surface-muted);
+  color: var(--text-strong);
+}
+
+.workspace-tools__item:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.workspace-tools__item--active {
+  background: var(--accent-tint-bg);
+  color: var(--accent);
+}
+
+.workspace-tools__item-icon {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+}
+
+.workspace-tools__item-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.workspace-tools__item kbd {
+  color: var(--muted-soft);
+  font: inherit;
+  font-size: 11px;
 }
 
 .topbar__actions,
@@ -141,10 +223,6 @@
 
 .sidebar-toggle {
   -webkit-app-region: no-drag;
-  position: absolute;
-  top: 11px;
-  left: var(--titlebar-toggle-left);
-  z-index: 80;
 }
 
 .sidebar-toggle__button {
@@ -155,7 +233,13 @@
   background: var(--surface-overlay-muted);
 }
 
-.shell--sidebar-collapsed .topbar {
-  margin-left: var(--titlebar-collapsed-main-padding-left);
-  padding-left: 0;
+.sidebar-toggle__tooltip {
+  right: 0;
+  left: auto;
+  transform: translateY(-2px);
+}
+
+.sidebar-toggle:hover .sidebar-toggle__tooltip,
+.sidebar-toggle:focus-within .sidebar-toggle__tooltip {
+  transform: none;
 }

@@ -98,3 +98,33 @@ test("wraps long markdown content inside transcript message bubbles", async () =
     await harness.close();
   }
 });
+
+test("sizes short user message bubbles to their content", async () => {
+  const userDataDir = await makeUserDataDir();
+  const workspacePath = await makeWorkspace("short-message-bubble-workspace");
+  const harness = await launchDesktop(userDataDir, {
+    initialWorkspaces: [workspacePath],
+    testMode: "background",
+  });
+
+  try {
+    const window = await harness.firstWindow();
+    await waitForWorkspaceByPath(window, workspacePath);
+    await window.getByRole("complementary").getByRole("button", { name: "New thread" }).click();
+    const newThreadPrompt = window.getByLabel("New thread prompt");
+    await newThreadPrompt.fill("好的");
+    expect(await newThreadPrompt.evaluate((element) => getComputedStyle(element).boxShadow)).toBe("none");
+    await window.getByRole("button", { name: "Start thread" }).click();
+
+    const bubble = window.locator(".timeline-item--user", { hasText: "好的" }).locator(".timeline-item__bubble");
+    await expect(bubble).toBeVisible({ timeout: 15_000 });
+    const width = await bubble.evaluate((element) => element.getBoundingClientRect().width);
+    expect(width).toBeLessThan(100);
+
+    const composer = window.getByTestId("composer");
+    await composer.click();
+    expect(await composer.evaluate((element) => getComputedStyle(element).boxShadow)).toBe("none");
+  } finally {
+    await harness.close();
+  }
+});

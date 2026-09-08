@@ -23,7 +23,7 @@ export default function isolationExtension(pi) {
 }
 `;
 
-test("keeps extension widgets, status, and title scoped to the active session", async () => {
+test("keeps extension titles scoped while status and widgets stay out of the composer", async () => {
   test.setTimeout(60_000);
   const userDataDir = await makeUserDataDir();
   const workspacePath = await makeWorkspace("extensions-isolation-workspace");
@@ -45,10 +45,10 @@ test("keeps extension widgets, status, and title scoped to the active session", 
     await composer.press("Enter");
 
     await expect(window.locator(".topbar__session")).toHaveText("Marked by extension");
-    await expect(window.getByTestId("extension-dock-summary")).toHaveText("Session marked");
-    await window.getByTestId("extension-dock-toggle").click();
-    await expect(window.getByTestId("extension-dock-body")).toContainText("Marked widget");
-    await expect(window.getByTestId("extension-dock-body")).toContainText("Marked below");
+    await expect(window.getByTestId("extension-dock")).toHaveCount(0);
+    await expect(window.locator(".composer__surface")).not.toContainText("Session marked");
+    await expect(window.locator(".composer__surface")).not.toContainText("Marked widget");
+    await expect(window.locator(".composer__surface")).not.toContainText("Marked below");
 
     await clickSession(window, "Session B");
     await expect(window.locator(".topbar__session")).toHaveText("Session B");
@@ -56,8 +56,7 @@ test("keeps extension widgets, status, and title scoped to the active session", 
 
     await clickSession(window, "Session A");
     await expect(window.locator(".topbar__session")).toHaveText("Marked by extension");
-    await expect(window.getByTestId("extension-dock-summary")).toHaveText("Session marked");
-    await expect(window.getByTestId("extension-dock-body")).toContainText("Marked widget");
+    await expect(window.getByTestId("extension-dock")).toHaveCount(0);
   } finally {
     await harness.close();
   }

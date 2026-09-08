@@ -15,6 +15,7 @@ export type {
   RunFailedEvent,
   RunId,
   SessionAttachment,
+  SessionBrowserElementAttachment,
   SessionClosedEvent,
   SessionConfig,
   SessionDriver,

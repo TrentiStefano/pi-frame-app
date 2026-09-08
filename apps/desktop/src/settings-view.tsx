@@ -1,12 +1,19 @@
-import type { RuntimeSettingsSnapshot, RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
-import type { ModelSettingsScopeMode, NotificationPreferences, ThemePresetId, WorkspaceRecord } from "./desktop-state";
-import type { CustomProviderConfig, DesktopNotificationPermissionStatus } from "./ipc";
+import type { RuntimeSnapshot } from "@pi-frame/session-driver/runtime-types";
+import type { NotificationPreferences, ThemeMode, WorkspaceRecord } from "./desktop-state";
+import type {
+  DeleteModelConfigurationInput,
+  DesktopNotificationPermissionStatus,
+  ModelConfigurationDefaultsInput,
+  SaveModelConfigurationInput,
+  SoftwareUpdateSnapshot,
+} from "./ipc";
 import { SettingsAppearanceSection } from "./settings-appearance-section";
 import { SettingsGeneralSection } from "./settings-general-section";
 import { SettingsModelsSection } from "./settings-models-section";
 import { SettingsNotificationsSection } from "./settings-notifications-section";
-import { SettingsProvidersSection } from "./settings-providers-section";
 import { type SettingsSection, sectionTitle, sectionDescription } from "./settings-utils";
+import { useTranslation } from "react-i18next";
+import type { ShortcutBindings } from "./keyboard-shortcuts";
 
 export type { SettingsSection } from "./settings-utils";
 
@@ -17,29 +24,32 @@ interface SettingsViewProps {
   readonly notificationPreferences: NotificationPreferences;
   readonly notificationPermissionStatus: DesktopNotificationPermissionStatus;
   readonly notificationPermissionPending: boolean;
-  readonly modelSettingsScopeMode: ModelSettingsScopeMode;
   readonly integratedTerminalShell: string;
-  readonly themeMode: "system" | "light" | "dark";
-  readonly themePresetId: ThemePresetId;
-  readonly enableTransparency: boolean;
-  readonly onSetModelSettingsScopeMode: (mode: ModelSettingsScopeMode) => void;
-  readonly onSetDefaultModel: (provider: string, modelId: string) => void;
-  readonly onSetThinkingLevel: (thinkingLevel: RuntimeSettingsSnapshot["defaultThinkingLevel"]) => void;
+  readonly appLanguage: import("./desktop-state").AppLanguage;
+  readonly computerUseEnabled: boolean;
+  readonly platform: NodeJS.Platform;
+  readonly shortcutBindings: ShortcutBindings;
+  readonly themeMode: ThemeMode;
+  readonly themeId: string;
+  readonly customThemes: readonly import("./theme/types").CustomTheme[];
+  readonly onSaveModel: (input: SaveModelConfigurationInput) => Promise<string | undefined>;
+  readonly onDeleteModel: (input: DeleteModelConfigurationInput) => Promise<string | undefined>;
+  readonly onSetModelDefaults: (input: ModelConfigurationDefaultsInput) => Promise<string | undefined>;
   readonly onToggleSkillCommands: (enabled: boolean) => void;
-  readonly onSetScopedModelPatterns: (patterns: readonly string[]) => void;
-  readonly onLoginProvider: (providerId: string) => void;
-  readonly onLogoutProvider: (providerId: string) => void;
-  readonly onSetProviderApiKey: (providerId: string, apiKey: string) => Promise<string | undefined>;
-  readonly onRemoveProviderApiKey: (providerId: string) => Promise<string | undefined>;
-  readonly onSaveCustomProvider: (config: CustomProviderConfig) => Promise<string | undefined>;
-  readonly onDeleteCustomProvider: (providerId: string) => Promise<string | undefined>;
+  readonly onSetComputerUseEnabled: (enabled: boolean) => void;
+  readonly onSetShortcutBindings: (bindings: ShortcutBindings) => void;
   readonly onSetNotificationPreferences: (preferences: Partial<NotificationPreferences>) => void;
   readonly onSetIntegratedTerminalShell: (shellPath: string) => void;
+  readonly onSetAppLanguage: (language: import("./desktop-state").AppLanguage) => void;
   readonly onRequestNotificationPermission: () => void;
   readonly onOpenSystemNotificationSettings: () => void;
-  readonly onSetThemeMode: (mode: "system" | "light" | "dark") => void;
-  readonly onSetThemePresetId: (presetId: ThemePresetId) => void;
-  readonly onSetEnableTransparency: (enabled: boolean) => void;
+  readonly onSetThemeMode: (mode: ThemeMode) => void;
+  readonly onSetThemeId: (themeId: string) => void;
+  readonly onImportVSCodeTheme: () => void;
+  readonly onDeleteCustomTheme: (themeId: string) => void;
+  readonly onCheckForUpdates: () => Promise<SoftwareUpdateSnapshot>;
+  readonly onInstallAppUpdate: () => Promise<void>;
+  readonly onUpdateExtensions: (sources: readonly string[]) => Promise<void>;
 }
 
 export function SettingsView({
@@ -49,42 +59,47 @@ export function SettingsView({
   notificationPreferences,
   notificationPermissionStatus,
   notificationPermissionPending,
-  modelSettingsScopeMode,
   integratedTerminalShell,
+  appLanguage,
+  computerUseEnabled,
+  platform,
+  shortcutBindings,
   themeMode,
-  themePresetId,
-  enableTransparency,
-  onSetModelSettingsScopeMode,
-  onSetDefaultModel,
-  onSetThinkingLevel,
+  themeId,
+  customThemes,
+  onSaveModel,
+  onDeleteModel,
+  onSetModelDefaults,
   onToggleSkillCommands,
-  onSetScopedModelPatterns,
-  onLoginProvider,
-  onLogoutProvider,
-  onSetProviderApiKey,
-  onRemoveProviderApiKey,
-  onSaveCustomProvider,
-  onDeleteCustomProvider,
+  onSetComputerUseEnabled,
+  onSetShortcutBindings,
   onSetNotificationPreferences,
   onSetIntegratedTerminalShell,
+  onSetAppLanguage,
   onRequestNotificationPermission,
   onOpenSystemNotificationSettings,
   onSetThemeMode,
-  onSetThemePresetId,
-  onSetEnableTransparency,
+  onSetThemeId,
+  onImportVSCodeTheme,
+  onDeleteCustomTheme,
+  onCheckForUpdates,
+  onInstallAppUpdate,
+  onUpdateExtensions,
 }: SettingsViewProps) {
+  const { t } = useTranslation();
   if (
     !workspace &&
     section !== "general" &&
     section !== "notifications" &&
-    section !== "appearance"
+    section !== "appearance" &&
+    section !== "models"
   ) {
     return (
       <section className="canvas canvas--empty">
         <div className="empty-panel">
-          <div className="session-header__eyebrow">Settings</div>
-          <h1>Select a workspace</h1>
-          <p>Provider and skill settings need a selected workspace.</p>
+          <div className="session-header__eyebrow">{t("common.settings")}</div>
+          <h1>{t("settings.selectWorkspace")}</h1>
+          <p>{t("settings.workspaceRequired")}</p>
         </div>
       </section>
     );
@@ -97,7 +112,7 @@ export function SettingsView({
           <div>
             <h1 className="view-header__title">{sectionTitle(section)}</h1>
             <p className="view-header__body">
-              {sectionDescription(section, workspace?.name ?? "this workspace")}
+              {sectionDescription(section)}
             </p>
           </div>
         </header>
@@ -106,44 +121,36 @@ export function SettingsView({
           {section === "appearance" ? (
             <SettingsAppearanceSection
               themeMode={themeMode}
-              themePresetId={themePresetId}
+              themeId={themeId}
+              customThemes={customThemes}
               onSetThemeMode={onSetThemeMode}
-              onSetThemePresetId={onSetThemePresetId}
-              enableTransparency={enableTransparency}
-              onSetEnableTransparency={onSetEnableTransparency}
+              onSetThemeId={onSetThemeId}
+              onImportVSCodeTheme={onImportVSCodeTheme}
+              onDeleteCustomTheme={onDeleteCustomTheme}
             />
           ) : null}
 
           {section === "general" ? (
             <SettingsGeneralSection
               runtime={runtime}
-              modelSettingsScopeMode={modelSettingsScopeMode}
               integratedTerminalShell={integratedTerminalShell}
-              onSetModelSettingsScopeMode={onSetModelSettingsScopeMode}
+              appLanguage={appLanguage}
+              computerUseEnabled={computerUseEnabled}
+              platform={platform}
+              shortcutBindings={shortcutBindings}
+              onSetShortcutBindings={onSetShortcutBindings}
               onSetIntegratedTerminalShell={onSetIntegratedTerminalShell}
+              onSetAppLanguage={onSetAppLanguage}
               onToggleSkillCommands={onToggleSkillCommands}
-            />
-          ) : null}
-
-          {section === "providers" ? (
-            <SettingsProvidersSection
-              runtime={runtime}
-              onLoginProvider={onLoginProvider}
-              onLogoutProvider={onLogoutProvider}
-              onSetProviderApiKey={onSetProviderApiKey}
-              onRemoveProviderApiKey={onRemoveProviderApiKey}
-              onSaveCustomProvider={onSaveCustomProvider}
-              onDeleteCustomProvider={onDeleteCustomProvider}
+              onSetComputerUseEnabled={onSetComputerUseEnabled}
+              onCheckForUpdates={onCheckForUpdates}
+              onInstallAppUpdate={onInstallAppUpdate}
+              onUpdateExtensions={onUpdateExtensions}
             />
           ) : null}
 
           {section === "models" ? (
-            <SettingsModelsSection
-              runtime={runtime}
-              onSetDefaultModel={onSetDefaultModel}
-              onSetScopedModelPatterns={onSetScopedModelPatterns}
-              onSetThinkingLevel={onSetThinkingLevel}
-            />
+            <SettingsModelsSection onSaveModel={onSaveModel} onDeleteModel={onDeleteModel} onSetDefaults={onSetModelDefaults} />
           ) : null}
 
           {section === "notifications" ? (

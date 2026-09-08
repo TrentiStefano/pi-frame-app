@@ -1,10 +1,10 @@
 {
-  "name": "@pi-gui/pi-sdk-driver",
+  "name": "@pi-frame/pi-sdk-driver",
   "version": "0.0.0",
   "private": true,
   "license": "MIT",
   "type": "module",
-  "description": "SDK-first session driver spike for pi-gui.",
+  "description": "SDK-first session driver adapter for pi-frame.",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -24,8 +24,8 @@
     "test": "tsc -p tsconfig.json && node --test \"test/**/*.test.mts\""
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.80.6",
-    "@pi-gui/catalogs": "workspace:*",
-    "@pi-gui/session-driver": "workspace:*"
+    "@earendil-works/pi-coding-agent": "^0.81.1",
+    "@pi-frame/catalogs": "workspace:*",
+    "@pi-frame/session-driver": "workspace:*"
   }
 }

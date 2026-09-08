@@ -1,4 +1,4 @@
-import type { PiSdkDriver, JsonCatalogStore } from "@pi-gui/pi-sdk-driver";
+import type { PiSdkDriver, JsonCatalogStore } from "@pi-frame/pi-sdk-driver";
 import type {
   CreateSessionOptions,
   SessionConfig,
@@ -6,8 +6,8 @@ import type {
   SessionRef,
   SessionSnapshot,
   WorkspaceRef,
-} from "@pi-gui/session-driver";
-import type { RuntimeCommandRecord, RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
+} from "@pi-frame/session-driver";
+import type { RuntimeCommandRecord, RuntimeSnapshot } from "@pi-frame/session-driver/runtime-types";
 import type {
   AppView,
   ComposerAttachment,
@@ -40,7 +40,6 @@ export interface AppStoreInternals {
   readonly driver: PiSdkDriver;
   readonly catalogStore: JsonCatalogStore;
   readonly worktreeManager: GitWorktreeManager;
-  readonly worktreeRoot: string;
   readonly attachmentStore: JsonFileStore<ComposerAttachment[]>;
 
   /* ── Shared helpers (called by extracted method groups) ── */
@@ -51,6 +50,7 @@ export interface AppStoreInternals {
   withError(error: unknown): Promise<DesktopAppState>;
   withSessionError(sessionRef: SessionRef, error: unknown): Promise<DesktopAppState>;
   withErrorHandling(fn: () => Promise<DesktopAppState>): Promise<DesktopAppState>;
+  setComputerUseEnabled(enabled: boolean): Promise<DesktopAppState>;
   selectSessionFast(target: WorkspaceSessionTarget): Promise<DesktopAppState>;
   workspaceRefFromState(workspaceId: string): WorkspaceRef | undefined;
   selectedSessionRef(): SessionRef | undefined;
@@ -80,7 +80,7 @@ export interface AppStoreInternals {
   clearPendingAutoTitle(sessionRef: SessionRef): void;
   updateQueuedComposerMessages(
     sessionRef: SessionRef,
-    queuedMessages: readonly import("@pi-gui/session-driver").SessionQueuedMessage[] | undefined,
+    queuedMessages: readonly import("@pi-frame/session-driver").SessionQueuedMessage[] | undefined,
   ): void;
   getQueuedComposerMessages(sessionRef: SessionRef): readonly QueuedComposerMessage[];
   setQueuedComposerEditState(sessionRef: SessionRef, editState: QueuedComposerEditState | undefined): void;
