@@ -1,7 +1,7 @@
 {
   "name": "pi-frame",
   "private": true,
-  "version": "0.2.0-beta.6",
+  "version": "0.2.0-beta.7",
   "description": "Codex-style Electron desktop workspace for the pi coding agent.",
   "repository": {
     "type": "git",

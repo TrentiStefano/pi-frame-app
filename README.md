@@ -2,7 +2,7 @@
 
 A powerful, Codex-style Electron desktop workspace for the [`pi`](https://github.com/earendil-works/pi) coding agent.
 
-[![Version](https://img.shields.io/badge/version-0.2.0--beta.6-orange.svg)](./apps/desktop/package.json)
+[![Version](https://img.shields.io/badge/version-0.2.0--beta.7-orange.svg)](./apps/desktop/package.json)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#install)
 
